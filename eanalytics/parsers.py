@@ -70,6 +70,8 @@ def parse_date(value: object) -> str | None:
         "%Y/%m/%d %H:%M:%S",
         "%Y-%m-%d %H:%M:%S",
         "%Y.%m.%d",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
     )
     for pattern in formats:
         try:
@@ -102,6 +104,39 @@ def list_matching_files(directory: Path, keywords: Iterable[str], suffixes: Iter
 def read_csv_rows(path: Path, header_index: int = 0) -> list[dict[str, str]]:
     with path.open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.reader(handle))
+    if header_index >= len(rows):
+        return []
+    headers = [normalize_spaces(column) for column in rows[header_index]]
+    records: list[dict[str, str]] = []
+    for row in rows[header_index + 1 :]:
+        if not any(str(cell).strip() for cell in row):
+            continue
+        record: dict[str, str] = {}
+        for index, header in enumerate(headers):
+            record[header] = row[index].strip() if index < len(row) else ""
+        records.append(record)
+    return records
+
+
+def read_delimited_rows(
+    path: Path,
+    delimiter: str = "\t",
+    encodings: tuple[str, ...] = ("utf-8-sig", "cp932", "shift_jis"),
+    header_index: int = 0,
+) -> list[dict[str, str]]:
+    last_error: Exception | None = None
+    rows: list[list[str]] | None = None
+    for encoding in encodings:
+        try:
+            with path.open(encoding=encoding, newline="") as handle:
+                rows = list(csv.reader(handle, delimiter=delimiter))
+            break
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if rows is None:
+        if last_error is not None:
+            raise last_error
+        return []
     if header_index >= len(rows):
         return []
     headers = [normalize_spaces(column) for column in rows[header_index]]

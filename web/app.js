@@ -255,9 +255,11 @@ function openVariantModal(variantId) {
     </header>
     ${
       hasTimeline
-        ? `<div class="variant-chart-grid">
-            ${buildLineChart(timeline, "units", "#b63b6a", formatNumber, "日別個数")}
-            ${buildLineChart(timeline, "sales", "#7d2446", formatCurrency, "日別売上")}
+        ? `<div class="variant-chart-scroll">
+            <div class="variant-chart-grid">
+              ${buildLineChart(timeline, "units", "#b63b6a", formatNumber, "日別個数")}
+              ${buildLineChart(timeline, "sales", "#7d2446", formatCurrency, "日別売上")}
+            </div>
           </div>`
         : `<div class="variant-empty">${escapeHtml(variant.timelineReason || "このSKUの日別データはありません。")}</div>`
     }

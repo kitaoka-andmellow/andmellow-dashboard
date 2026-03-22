@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from .parsers import (
     parse_percentage,
     read_csv_rows,
     read_csv_rows_matching,
+    read_delimited_rows,
     read_xlsx_rows,
     slugify,
 )
@@ -120,6 +122,42 @@ def path_matches_period(path: Path, period_start: str | None, period_end: str | 
 
 def filter_paths_by_period(paths: list[Path], period_start: str | None, period_end: str | None) -> list[Path]:
     return [path for path in paths if path_matches_period(path, period_start, period_end)]
+
+
+def date_in_period(date: str | None, period_start: str | None, period_end: str | None) -> bool:
+    if not date:
+        return False
+    if period_start and date < period_start:
+        return False
+    if period_end and date > period_end:
+        return False
+    return True
+
+
+def normalize_color_text(label: str | None) -> str:
+    text = unicodedata.normalize("NFKC", normalize_spaces(str(label or "")).lower())
+    chars: list[str] = []
+    for char in text:
+        code = ord(char)
+        if 0x30A1 <= code <= 0x30F6:
+            chars.append(chr(code - 0x60))
+        else:
+            chars.append(char)
+    return "".join(chars)
+
+
+def color_sort_key(label: str | None) -> tuple[tuple[int, str | int], ...]:
+    text = normalize_color_text(label) or "未設定"
+    parts = re.split(r"(\d+)", text)
+    key: list[tuple[int, str | int]] = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isdigit():
+            key.append((1, int(part)))
+        else:
+            key.append((0, part))
+    return tuple(key) or ((0, text),)
 
 
 def parse_amazon_variant(title: str, fallback: str = "") -> dict[str, str | None]:
@@ -284,6 +322,8 @@ def build_distribution(variants: list[dict[str, Any]], field: str) -> list[dict[
         bucket["orders"] += float(variant.get("orders", 0))
     if field == "size":
         items = sorted(buckets.values(), key=lambda item: size_sort_key(item["label"]))
+    elif field == "color":
+        items = sorted(buckets.values(), key=lambda item: color_sort_key(item["label"]))
     else:
         items = sorted(
             buckets.values(),
@@ -315,15 +355,16 @@ def summarize_product(detail: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def variant_sort_key(variant: dict[str, Any]) -> tuple[tuple[int, int, float, str], float, float, str]:
+def variant_sort_key(variant: dict[str, Any]) -> tuple[Any, ...]:
     size = variant.get("size") or "未設定"
     color = normalize_spaces(str(variant.get("color") or "")) or "未設定"
     label = normalize_spaces(str(variant.get("label") or "")) or "未設定"
     return (
         size_sort_key(size),
+        color_sort_key(color),
         -float(variant.get("units", 0) or 0),
         -float(variant.get("sales", 0) or 0),
-        f"{color} {label}",
+        label,
     )
 
 
@@ -366,6 +407,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
     ad_cost_available = False
     transactions_paths = filter_paths_by_period(list_matching_files(directory, ["取引"], [".csv"]), period_start, period_end)
     business_paths = filter_paths_by_period(list_matching_files(directory, ["BusinessReport"], [".csv"]), period_start, period_end)
+    order_report_paths = filter_paths_by_period(list_matching_files(directory, [], [".txt"]), period_start, period_end)
     ads_paths = filter_paths_by_period(list_matching_files(directory, ["広告"], [".xlsx"]), period_start, period_end)
 
     if business_paths:
@@ -443,7 +485,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                     "limitations": [],
                     "_aliases": set(),
                     "_orders": set(),
-                    "_timeline": defaultdict(lambda: {"sales": 0.0, "orders": set()}),
+                    "_timeline": defaultdict(lambda: {"sales": 0.0, "orders": set(), "units": 0.0}),
                 },
             )
             if len(family_name) < len(detail["name"]):
@@ -492,7 +534,8 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 paths=[],
             )
         )
-        notes.append("Amazon の商品別レポートが無いため、商品ごとのサイズ・色分布は表示できません。")
+        if not order_report_paths:
+            notes.append("Amazon の商品別レポートが無いため、商品ごとのサイズ・色分布は表示できません。")
 
     alias_index: list[tuple[str, str]] = []
     for family_key, detail in families.items():
@@ -510,7 +553,165 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 return family_key
         return None
 
+    asin_index: dict[str, str] = {}
+    for family_key, detail in families.items():
+        for variant in detail["variants"]:
+            child_asin = normalize_spaces(variant.get("childAsin", ""))
+            if child_asin:
+                asin_index[child_asin] = family_key
+
+    def ensure_amazon_detail(product_title: str, asin: str | None = None) -> tuple[str, dict[str, Any]]:
+        variant_meta = parse_amazon_variant(product_title, product_title)
+        family_name = variant_meta["base"] or strip_trailing_variant(product_title) or product_title or "Amazon商品"
+        family_key = normalize_product_text(family_name) or normalize_product_text(product_title) or asin or slugify(family_name)
+        detail = families.setdefault(
+            family_key,
+            {
+                "id": f"amazon-{slugify(family_name)}",
+                "marketplace": "amazon",
+                "name": family_name,
+                "summary": {
+                    "sales": 0.0,
+                    "orders": 0.0,
+                    "units": 0.0,
+                    "sessions": 0.0,
+                    "conversionRate": None,
+                    "adCost": None,
+                    "adRatio": None,
+                    "bundleRate": None,
+                    "variantCount": 0,
+                },
+                "sizeDistribution": [],
+                "colorDistribution": [],
+                "variants": [],
+                "timeline": [],
+                "transactions": [],
+                "limitations": [],
+                "_aliases": set(),
+                "_orders": set(),
+                "_timeline": defaultdict(lambda: {"sales": 0.0, "orders": set(), "units": 0.0}),
+            },
+        )
+        detail["_aliases"].add(normalize_product_text(family_name))
+        detail["_aliases"].add(normalize_product_text(strip_trailing_variant(product_title)))
+        alias_index.append((normalize_product_text(family_name), family_key))
+        alias_index.append((normalize_product_text(strip_trailing_variant(product_title)), family_key))
+        alias_index.sort(key=lambda item: len(item[0]), reverse=True)
+        if asin:
+            asin_index[asin] = family_key
+        return family_key, detail
+
+    def ensure_amazon_variant(detail: dict[str, Any], product_title: str, asin: str | None = None) -> dict[str, Any]:
+        if asin:
+            for variant in detail["variants"]:
+                if normalize_spaces(variant.get("childAsin", "")) == asin:
+                    return variant
+        matched = match_amazon_variant(detail, product_title)
+        if matched is not None:
+            return matched
+        variant_meta = parse_amazon_variant(product_title, detail["name"])
+        variant = {
+            "id": asin or f"{detail['id']}-variant-{len(detail['variants']) + 1}",
+            "title": product_title or detail["name"],
+            "label": variant_meta["variant_label"] or asin or "未設定",
+            "size": variant_meta["size"],
+            "color": variant_meta["color"],
+            "sales": 0.0,
+            "orders": 0.0,
+            "units": 0.0,
+            "sessions": 0.0,
+            "conversionRate": None,
+            "childAsin": asin or None,
+            "timeline": [],
+            "timelineAvailable": False,
+            "timelineReason": "Amazon の注文レポートから日別推移を生成します。",
+            "_timeline": defaultdict(lambda: {"sales": 0.0, "units": 0.0}),
+        }
+        detail["variants"].append(variant)
+        return variant
+
     order_line_counts: dict[str, int] = defaultdict(int)
+    if order_report_paths:
+        order_report_rows: list[dict[str, str]] = []
+        seen_order_report_rows: set[tuple[str, ...]] = set()
+        order_report_duplicates_removed = 0
+        for order_report_path in order_report_paths:
+            rows = read_delimited_rows(order_report_path, delimiter="\t")
+            if rows and "amazon-order-id" not in rows[0]:
+                continue
+            for row in rows:
+                signature = exact_row_signature(
+                    row,
+                    [
+                        "amazon-order-id",
+                        "purchase-date",
+                        "sku",
+                        "asin",
+                        "quantity",
+                        "item-price",
+                        "item-promotion-discount",
+                    ],
+                )
+                if signature in seen_order_report_rows:
+                    order_report_duplicates_removed += 1
+                    continue
+                seen_order_report_rows.add(signature)
+                order_report_rows.append(row)
+        sources.append(
+            source_entry(
+                "amazon_order_report",
+                "Amazon 注文レポートTXT",
+                order_report_paths[0],
+                "loaded" if order_report_rows else "empty",
+                len(order_report_rows),
+                f"{len(order_report_paths)}ファイルの注文レポートTXTを読み込みました。"
+                if order_report_rows
+                else "注文レポートTXTに行がありません。",
+                paths=order_report_paths,
+                duplicates_removed=order_report_duplicates_removed,
+            )
+        )
+        for row in order_report_rows:
+            status = normalize_spaces(row.get("order-status", ""))
+            item_status = normalize_spaces(row.get("item-status", ""))
+            if status.lower() == "cancelled" or item_status.lower() == "cancelled":
+                continue
+            date = parse_date(row.get("purchase-date"))
+            order_id = normalize_spaces(row.get("amazon-order-id", ""))
+            asin = normalize_spaces(row.get("asin", ""))
+            product_title = normalize_spaces(row.get("product-name", ""))
+            units = parse_number(row.get("quantity"))
+            if not date_in_period(date, period_start, period_end) or not order_id or not units:
+                continue
+            item_price = parse_number(row.get("item-price"))
+            item_discount = parse_number(row.get("item-promotion-discount"))
+            sales = max(0.0, item_price - item_discount if item_discount >= 0 else item_price + item_discount)
+            family_key = asin_index.get(asin) or match_family(product_title)
+            if family_key and family_key in families:
+                detail = families[family_key]
+            else:
+                family_key, detail = ensure_amazon_detail(product_title, asin or None)
+            variant = ensure_amazon_variant(detail, product_title, asin or None)
+            detail["_orders"].add(order_id)
+            detail["_timeline"][date]["sales"] += sales
+            detail["_timeline"][date]["orders"].add(order_id)
+            detail["_timeline"][date]["units"] += units
+            variant["_timeline"][date]["sales"] += sales
+            variant["_timeline"][date]["units"] += units
+            order_line_counts[order_id] += 1
+    else:
+        sources.append(
+            source_entry(
+                "amazon_order_report",
+                "Amazon 注文レポートTXT",
+                None,
+                "missing",
+                0,
+                "注文レポートTXTが見つかりませんでした。",
+                paths=[],
+            )
+        )
+
     if transactions_paths:
         transaction_rows: list[dict[str, str]] = []
         seen_transaction_rows: set[tuple[str, ...]] = set()
@@ -553,7 +754,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 continue
             date = parse_date(row.get("日付"))
             order_id = normalize_spaces(row.get("注文番号", ""))
-            if not date or not order_id:
+            if not date_in_period(date, period_start, period_end) or not order_id:
                 continue
             gross_sales = parse_number(row.get("商品価格合計"))
             promo_discount = parse_number(row.get("プロモーション割引合計"))
@@ -562,20 +763,24 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             settlement = parse_number(row.get("合計 (JPY)"))
             product_detail = normalize_spaces(row.get("商品の詳細", ""))
             status = normalize_spaces(row.get("トランザクションステータス", ""))
+            units = parse_transaction_units(row)
             family_key = match_family(product_detail)
-            timeline[date]["sales"] += sales
             timeline[date]["fees"] += fee
-            timeline[date]["orders"].add(order_id)
-            order_line_counts[order_id] += 1
+            if not order_report_paths:
+                timeline[date]["sales"] += sales
+                timeline[date]["orders"].add(order_id)
+                order_line_counts[order_id] += 1
             if family_key and family_key in families:
                 detail = families[family_key]
-                detail["_orders"].add(order_id)
-                detail["_timeline"][date]["sales"] += sales
-                detail["_timeline"][date]["orders"].add(order_id)
-                matched_variant = match_amazon_variant(detail, product_detail)
-                if matched_variant is not None:
-                    matched_variant["_timeline"][date]["sales"] += sales
-                    matched_variant["_timeline"][date]["units"] += parse_transaction_units(row)
+                if not order_report_paths:
+                    detail["_orders"].add(order_id)
+                    detail["_timeline"][date]["sales"] += sales
+                    detail["_timeline"][date]["orders"].add(order_id)
+                    detail["_timeline"][date]["units"] += units
+                    matched_variant = match_amazon_variant(detail, product_detail)
+                    if matched_variant is not None:
+                        matched_variant["_timeline"][date]["sales"] += sales
+                        matched_variant["_timeline"][date]["units"] += units
                 detail["transactions"].append(
                     {
                         "date": date,
@@ -601,7 +806,8 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 paths=[],
             )
         )
-        notes.append("Amazon の取引CSVが無いため、商品ごとのトランザクションとセット購入率は表示できません。")
+        if not order_report_paths:
+            notes.append("Amazon の取引CSVが無いため、商品ごとのトランザクションとセット購入率は表示できません。")
 
     if ads_paths:
         records = 0
@@ -625,6 +831,8 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                     continue
                 seen_ad_rows.add(signature)
                 date = parse_date(payload.get("日付"))
+                if date and not date_in_period(date, period_start, period_end):
+                    continue
                 cost = parse_number(payload.get("費用"))
                 if date:
                     timeline[date]["adCost"] += cost
@@ -676,16 +884,17 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             }
             for date, values in sorted(detail["_timeline"].items())
         ]
+        if detail["_orders"]:
+            detail["summary"]["sales"] = round(sum(point["sales"] for point in detail["timeline"]), 2)
+            detail["summary"]["orders"] = len(detail["_orders"])
+            detail["summary"]["units"] = round(
+                sum(values["units"] for values in detail["_timeline"].values()),
+                2,
+            )
         bundle_orders = len(detail["_orders"] & multi_item_orders)
         order_count = len(detail["_orders"])
         detail["summary"]["bundleRate"] = round_metric(safe_div(bundle_orders, order_count))
         detail["summary"]["variantCount"] = len(detail["variants"])
-        detail["summary"]["conversionRate"] = round_metric(
-            safe_div(detail["summary"]["units"], detail["summary"]["sessions"])
-        )
-        detail["sizeDistribution"] = build_distribution(detail["variants"], "size")
-        detail["colorDistribution"] = build_distribution(detail["variants"], "color")
-        detail["variants"].sort(key=variant_sort_key)
         for variant in detail["variants"]:
             variant["timeline"] = [
                 {
@@ -696,12 +905,21 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 for date, values in sorted(variant.get("_timeline", {}).items())
             ]
             if variant["timeline"]:
+                variant["sales"] = round(sum(point["sales"] for point in variant["timeline"]), 2)
+                variant["units"] = round(sum(point["units"] for point in variant["timeline"]), 2)
+            if variant["timeline"]:
                 variant["timelineAvailable"] = True
                 variant["timelineReason"] = None
             else:
                 variant["timelineAvailable"] = False
                 variant["timelineReason"] = "このSKUに紐づく Amazon 取引が見つからず、日別推移は表示していません。"
             variant.pop("_timeline", None)
+        detail["summary"]["conversionRate"] = round_metric(
+            safe_div(detail["summary"]["units"], detail["summary"]["sessions"])
+        )
+        detail["sizeDistribution"] = build_distribution(detail["variants"], "size")
+        detail["colorDistribution"] = build_distribution(detail["variants"], "color")
+        detail["variants"].sort(key=variant_sort_key)
         if detail["summary"]["adCost"] is None:
             detail["limitations"].append("Amazon の広告レポートは商品別費用を含まないため、商品単位の広告費率は未算出です。")
         if not detail["timeline"]:
@@ -781,6 +999,9 @@ def build_rakuten_marketplace(root: Path, period_start: str | None = None, perio
                 points_rows.append(row)
         nonempty_rows = [row for row in points_rows if normalize_spaces(row.get("商品名", ""))]
         for row in nonempty_rows:
+            row_date = parse_date(row.get("日付"))
+            if row_date and not date_in_period(row_date, period_start, period_end):
+                continue
             key = normalize_product_text(row.get("商品名", ""))
             promoted_sales_by_product[key] += parse_number(row.get("運用型ポイント変倍経由売上金額"))
         sources.append(
@@ -969,7 +1190,7 @@ def build_rakuten_marketplace(root: Path, period_start: str | None = None, perio
         )
         for row in daily_rows:
             date = parse_date(row.get("日付"))
-            if not date:
+            if not date_in_period(date, period_start, period_end):
                 continue
             sales = parse_number(row.get("売上金額"))
             orders = parse_number(row.get("売上件数"))

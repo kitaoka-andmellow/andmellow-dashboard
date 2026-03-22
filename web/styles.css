@@ -627,7 +627,8 @@ tfoot .heatmap-axis {
   z-index: 1;
   width: min(56rem, 100%);
   max-height: min(88vh, 54rem);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   border-radius: 22px;
   border: 1px solid rgba(27, 39, 57, 0.12);
   background: rgba(255, 252, 245, 0.97);
@@ -693,6 +694,7 @@ tfoot .heatmap-axis {
 .variant-chart-grid {
   display: grid;
   gap: 0.8rem;
+  min-width: 42rem;
 }
 
 .variant-chart-card {
@@ -700,6 +702,16 @@ tfoot .heatmap-axis {
   border: 1px solid var(--panel-border);
   background: rgba(255, 255, 255, 0.72);
   padding: 0.85rem 0.9rem;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.variant-chart-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0.15rem;
+  -webkit-overflow-scrolling: touch;
 }
 
 .variant-chart-head {
@@ -725,6 +737,7 @@ tfoot .heatmap-axis {
   display: block;
   width: 100%;
   height: auto;
+  min-width: 40rem;
 }
 
 .variant-chart-axis {
