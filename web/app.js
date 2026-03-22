@@ -151,7 +151,10 @@ function hideAuthOverlay() {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    ...options,
+  });
   let payload = null;
   const contentType = response.headers.get("Content-Type") || "";
   if (contentType.includes("application/json")) {
@@ -191,11 +194,15 @@ function loadGoogleScript() {
 async function handleGoogleCredential(response) {
   setAuthMessage("認証中...");
   try {
-    const session = await fetchJson("/api/auth/google", {
+    await fetchJson("/api/auth/google", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ credential: response.credential }),
     });
+    const session = await fetchJson("/api/session", { cache: "no-store" });
+    if (!session.authenticated) {
+      throw new Error("ログイン情報を保存できませんでした。Cookie のブロック設定を確認してください。");
+    }
     state.session = session;
     updateAuthStatus();
     hideAuthOverlay();
@@ -543,7 +550,10 @@ async function loadDashboard() {
   elements.refreshButton.disabled = true;
   elements.refreshButton.textContent = "更新中";
   try {
-    const response = await fetch("/api/dashboard", { cache: "no-store" });
+    const response = await fetch("/api/dashboard", {
+      cache: "no-store",
+      credentials: "same-origin",
+    });
     if (response.status === 401) {
       state.session = null;
       updateAuthStatus();

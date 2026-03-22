@@ -7,6 +7,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from email.utils import formatdate
 from typing import Any
 
 SESSION_COOKIE_NAME = os.environ.get("SESSION_COOKIE_NAME", "ecanalytics_session")
@@ -136,6 +137,7 @@ def session_cookie_value(token: str, expires_at: int, secure: bool) -> str:
         "HttpOnly",
         "SameSite=Lax",
         f"Max-Age={max(0, expires_at - int(time.time()))}",
+        f"Expires={formatdate(expires_at, usegmt=True)}",
     ]
     if secure:
         parts.append("Secure")
@@ -149,6 +151,7 @@ def expired_session_cookie_value(secure: bool) -> str:
         "HttpOnly",
         "SameSite=Lax",
         "Max-Age=0",
+        "Expires=Thu, 01 Jan 1970 00:00:00 GMT",
     ]
     if secure:
         parts.append("Secure")
