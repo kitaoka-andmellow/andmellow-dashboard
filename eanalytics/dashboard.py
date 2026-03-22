@@ -160,6 +160,36 @@ def color_sort_key(label: str | None) -> tuple[tuple[int, str | int], ...]:
     return tuple(key) or ((0, text),)
 
 
+def amazon_sku_family(value: str | None) -> str | None:
+    text = normalize_spaces(str(value or "")).upper()
+    if not text:
+        return None
+    head = text.split("-", 1)[0]
+    head = re.sub(r"[^A-Z0-9]+", "", head)
+    return head or None
+
+
+def amazon_family_key(
+    family_name: str,
+    parent_asin: str | None = None,
+    child_asin: str | None = None,
+    sku: str | None = None,
+) -> str:
+    parent = normalize_spaces(parent_asin or "")
+    if parent:
+        return f"amazon-parent:{parent}"
+    sku_family = amazon_sku_family(sku)
+    if sku_family:
+        return f"amazon-sku:{sku_family}"
+    child = normalize_spaces(child_asin or "")
+    if child:
+        return f"amazon-child:{child}"
+    normalized = normalize_product_text(family_name)
+    if normalized:
+        return f"amazon-title:{normalized}"
+    return f"amazon-title:{slugify(family_name or 'amazon-product')}"
+
+
 def parse_amazon_variant(title: str, fallback: str = "") -> dict[str, str | None]:
     title = normalize_spaces(title)
     base = strip_trailing_variant(title) or fallback
@@ -193,11 +223,15 @@ def parse_transaction_units(row: dict[str, str]) -> float:
     return 1.0
 
 
-def match_amazon_variant(detail: dict[str, Any], product_detail: str) -> dict[str, Any] | None:
+def match_amazon_variant(
+    detail: dict[str, Any],
+    product_detail: str,
+    allow_single_fallback: bool = True,
+) -> dict[str, Any] | None:
     variants = detail.get("variants", [])
     if not variants:
         return None
-    if len(variants) == 1:
+    if len(variants) == 1 and allow_single_fallback:
         return variants[0]
 
     parsed = parse_amazon_variant(product_detail, detail.get("name", ""))
@@ -218,6 +252,32 @@ def match_amazon_variant(detail: dict[str, Any], product_detail: str) -> dict[st
         if normalize_spaces(variant.get("title", "")) == normalized_detail:
             return variant
     return None
+
+
+def update_amazon_variant_metadata(
+    variant: dict[str, Any],
+    product_title: str,
+    variant_meta: dict[str, str | None],
+    asin: str | None = None,
+    sku: str | None = None,
+) -> None:
+    title = normalize_spaces(product_title)
+    current_title = normalize_spaces(variant.get("title", ""))
+    if title and (not current_title or (len(title) > len(current_title) and current_title in title)):
+        variant["title"] = title
+    if asin and not normalize_spaces(variant.get("childAsin", "")):
+        variant["childAsin"] = asin
+    if sku and not normalize_spaces(variant.get("sku", "")):
+        variant["sku"] = sku
+    changed = False
+    for field in ("size", "color"):
+        if variant_meta.get(field) and not normalize_spaces(str(variant.get(field) or "")):
+            variant[field] = variant_meta[field]
+            changed = True
+    if changed or not normalize_spaces(variant.get("label", "")):
+        variant["label"] = (
+            " / ".join(part for part in (variant.get("color"), variant.get("size")) if part) or "未設定"
+        )
 
 
 def clean_rakuten_variant_text(value: str | None) -> str | None:
@@ -412,7 +472,6 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
     use_order_reports_only = bool(order_report_paths)
     if use_order_reports_only:
         transactions_paths = []
-        business_paths = []
 
     if business_paths:
         business_rows: list[dict[str, str]] = []
@@ -463,7 +522,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             parent = row.get("（親）ASIN", "").strip() or row.get("（子）ASIN", "").strip()
             child = row.get("（子）ASIN", "").strip()
             family_name = parent_names.get(parent, child or "Amazon商品")
-            family_key = normalize_product_text(family_name) or parent or child
+            family_key = amazon_family_key(family_name, parent_asin=parent, child_asin=child)
             detail = families.setdefault(
                 family_key,
                 {
@@ -496,9 +555,9 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 detail["name"] = family_name
             title = row.get("タイトル", "").strip()
             variant_meta = parse_amazon_variant(title, family_name)
-            sales = parse_number(row.get("注文商品の売上額"))
-            units = parse_number(row.get("注文品目総数"))
-            orders = parse_number(row.get("注文された商品点数"))
+            sales = 0.0 if use_order_reports_only else parse_number(row.get("注文商品の売上額"))
+            units = 0.0 if use_order_reports_only else parse_number(row.get("注文品目総数"))
+            orders = 0.0 if use_order_reports_only else parse_number(row.get("注文された商品点数"))
             sessions = parse_number(row.get("セッション数 - 合計"))
             detail["summary"]["sales"] += sales
             detail["summary"]["orders"] += orders
@@ -520,9 +579,14 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                     "sessions": round(sessions, 2),
                     "conversionRate": round_metric(parse_percentage(row.get("ユニットセッション率"))),
                     "childAsin": child or None,
+                    "sku": None,
                     "timeline": [],
                     "timelineAvailable": False,
-                    "timelineReason": "Amazon の取引CSVが無いため、このSKUの日別推移は未表示です。",
+                    "timelineReason": (
+                        "Amazon の注文レポートから日別推移を生成します。"
+                        if use_order_reports_only
+                        else "Amazon の取引CSVが無いため、このSKUの日別推移は未表示です。"
+                    ),
                     "_timeline": defaultdict(lambda: {"sales": 0.0, "units": 0.0}),
                 }
             )
@@ -532,16 +596,13 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 "amazon_business",
                 "Amazon 商品別レポート",
                 None,
-                "ignored" if use_order_reports_only else "missing",
+                "missing",
                 0,
-                "注文レポートTXTを優先するため、BusinessReport CSV は使っていません。"
-                if use_order_reports_only
-                else "BusinessReport CSV が見つかりませんでした。",
+                "BusinessReport CSV が見つかりませんでした。",
                 paths=[],
             )
         )
-        if not order_report_paths:
-            notes.append("Amazon の商品別レポートが無いため、商品ごとのサイズ・色分布は表示できません。")
+        notes.append("Amazon の商品別レポートが無いため、親ASINベースの統合やサイズ・色の補完精度が下がる可能性があります。")
 
     alias_index: list[tuple[str, str]] = []
     for family_key, detail in families.items():
@@ -549,6 +610,8 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             if alias:
                 alias_index.append((alias, family_key))
     alias_index.sort(key=lambda item: len(item[0]), reverse=True)
+
+    sku_family_index: dict[str, str] = {}
 
     def match_family(product_detail: str) -> str | None:
         normalized = normalize_product_text(product_detail)
@@ -566,10 +629,14 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             if child_asin:
                 asin_index[child_asin] = family_key
 
-    def ensure_amazon_detail(product_title: str, asin: str | None = None) -> tuple[str, dict[str, Any]]:
+    def ensure_amazon_detail(
+        product_title: str,
+        asin: str | None = None,
+        sku: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         variant_meta = parse_amazon_variant(product_title, product_title)
         family_name = variant_meta["base"] or strip_trailing_variant(product_title) or product_title or "Amazon商品"
-        family_key = normalize_product_text(family_name) or normalize_product_text(product_title) or asin or slugify(family_name)
+        family_key = amazon_family_key(family_name, child_asin=asin, sku=sku)
         detail = families.setdefault(
             family_key,
             {
@@ -603,19 +670,35 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
         alias_index.append((normalize_product_text(family_name), family_key))
         alias_index.append((normalize_product_text(strip_trailing_variant(product_title)), family_key))
         alias_index.sort(key=lambda item: len(item[0]), reverse=True)
+        sku_family = amazon_sku_family(sku)
+        if sku_family:
+            sku_family_index[sku_family] = family_key
         if asin:
             asin_index[asin] = family_key
         return family_key, detail
 
-    def ensure_amazon_variant(detail: dict[str, Any], product_title: str, asin: str | None = None) -> dict[str, Any]:
+    def ensure_amazon_variant(
+        detail: dict[str, Any],
+        product_title: str,
+        asin: str | None = None,
+        sku: str | None = None,
+    ) -> dict[str, Any]:
+        variant_meta = parse_amazon_variant(product_title, detail["name"])
         if asin:
             for variant in detail["variants"]:
                 if normalize_spaces(variant.get("childAsin", "")) == asin:
+                    update_amazon_variant_metadata(variant, product_title, variant_meta, asin=asin, sku=sku)
                     return variant
-        matched = match_amazon_variant(detail, product_title)
+        normalized_sku = normalize_spaces(sku or "")
+        if normalized_sku:
+            for variant in detail["variants"]:
+                if normalize_spaces(variant.get("sku", "")) == normalized_sku:
+                    update_amazon_variant_metadata(variant, product_title, variant_meta, asin=asin, sku=normalized_sku)
+                    return variant
+        matched = match_amazon_variant(detail, product_title, allow_single_fallback=not normalized_sku and not asin)
         if matched is not None:
+            update_amazon_variant_metadata(matched, product_title, variant_meta, asin=asin, sku=sku)
             return matched
-        variant_meta = parse_amazon_variant(product_title, detail["name"])
         variant = {
             "id": asin or f"{detail['id']}-variant-{len(detail['variants']) + 1}",
             "title": product_title or detail["name"],
@@ -628,6 +711,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             "sessions": 0.0,
             "conversionRate": None,
             "childAsin": asin or None,
+            "sku": normalized_sku or None,
             "timeline": [],
             "timelineAvailable": False,
             "timelineReason": "Amazon の注文レポートから日別推移を生成します。",
@@ -685,6 +769,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             date = parse_date(row.get("purchase-date"))
             order_id = normalize_spaces(row.get("amazon-order-id", ""))
             asin = normalize_spaces(row.get("asin", ""))
+            sku = normalize_spaces(row.get("sku", ""))
             product_title = normalize_spaces(row.get("product-name", ""))
             units = parse_number(row.get("quantity"))
             if not date_in_period(date, period_start, period_end) or not order_id or not units:
@@ -692,12 +777,21 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             item_price = parse_number(row.get("item-price"))
             item_discount = parse_number(row.get("item-promotion-discount"))
             sales = max(0.0, item_price - item_discount if item_discount >= 0 else item_price + item_discount)
-            family_key = asin_index.get(asin) or match_family(product_title)
+            family_key = asin_index.get(asin)
+            if not family_key:
+                sku_family = amazon_sku_family(sku)
+                if sku_family:
+                    family_key = sku_family_index.get(sku_family)
+            if not family_key:
+                family_key = match_family(product_title)
             if family_key and family_key in families:
                 detail = families[family_key]
             else:
-                family_key, detail = ensure_amazon_detail(product_title, asin or None)
-            variant = ensure_amazon_variant(detail, product_title, asin or None)
+                family_key, detail = ensure_amazon_detail(product_title, asin or None, sku or None)
+            variant = ensure_amazon_variant(detail, product_title, asin or None, sku or None)
+            sku_family = amazon_sku_family(sku)
+            if sku_family:
+                sku_family_index[sku_family] = family_key
             detail["_orders"].add(order_id)
             detail["_timeline"][date]["sales"] += sales
             detail["_timeline"][date]["orders"].add(order_id)
