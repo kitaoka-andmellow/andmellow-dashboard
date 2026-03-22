@@ -167,7 +167,7 @@ class DashboardSmokeTest(unittest.TestCase):
             self.assertTrue(variant["timelineAvailable"])
             self.assertEqual(variant["timeline"], [{"date": "2026-03-05", "sales": 1000.0, "units": 2.0}])
 
-    def test_amazon_variant_summary_respects_period_when_transactions_exist(self) -> None:
+    def test_amazon_business_report_remains_authoritative_when_transactions_exist(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "amzon-csv").mkdir()
@@ -185,10 +185,11 @@ class DashboardSmokeTest(unittest.TestCase):
             )
             variant = product["variants"][0]
 
-            self.assertEqual(product["summary"]["sales"], 1000.0)
-            self.assertEqual(product["summary"]["units"], 2.0)
-            self.assertEqual(variant["sales"], 1000.0)
-            self.assertEqual(variant["units"], 2.0)
+            self.assertEqual(product["summary"]["sales"], 3000.0)
+            self.assertEqual(product["summary"]["units"], 5.0)
+            self.assertEqual(variant["sales"], 3000.0)
+            self.assertEqual(variant["units"], 5.0)
+            self.assertEqual(variant["timeline"], [{"date": "2026-03-05", "sales": 1000.0, "units": 2.0}])
 
     def test_color_distribution_uses_name_order_not_sales_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -228,8 +229,8 @@ class DashboardSmokeTest(unittest.TestCase):
             )
             variant = product["variants"][0]
 
-            self.assertEqual(product["summary"]["sales"], 1000.0)
-            self.assertEqual(product["summary"]["units"], 2.0)
+            self.assertEqual(product["summary"]["sales"], 3000.0)
+            self.assertEqual(product["summary"]["units"], 3.0)
             self.assertTrue(variant["timelineAvailable"])
             self.assertEqual(variant["timeline"], [{"date": "2026-03-05", "sales": 1000.0, "units": 2.0}])
 
@@ -278,7 +279,7 @@ PARENT1,CHILD2,"テスト商品 ロングタイトル (JP, アルファベット
 
             sizes = [variant["size"] for variant in product["variants"]]
             self.assertEqual(sizes, ["M", "L"])
-            self.assertEqual(product["summary"]["sales"], 2200.0)
+            self.assertEqual(product["summary"]["sales"], 2000.0)
 
     def test_amazon_parent_summary_variant_is_dropped_when_child_variants_exist(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

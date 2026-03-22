@@ -280,12 +280,19 @@ def update_amazon_variant_metadata(
         )
 
 
-def should_keep_amazon_variant(variant: dict[str, Any], has_descriptive_peer: bool) -> bool:
+def should_keep_amazon_variant(
+    variant: dict[str, Any],
+    has_descriptive_peer: bool,
+    parent_asin: str | None = None,
+) -> bool:
     if not has_descriptive_peer:
         return True
     has_variant_meta = bool(normalize_spaces(str(variant.get("size") or "")) or normalize_spaces(str(variant.get("color") or "")))
     if has_variant_meta:
         return True
+    child_asin = normalize_spaces(str(variant.get("childAsin") or ""))
+    if parent_asin and child_asin == normalize_spaces(parent_asin):
+        return False
     has_sales = bool(float(variant.get("sales", 0) or 0))
     has_units = bool(float(variant.get("units", 0) or 0))
     has_timeline = bool(variant.get("timeline"))
@@ -481,8 +488,8 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
     business_paths = filter_paths_by_period(list_matching_files(directory, ["BusinessReport"], [".csv"]), period_start, period_end)
     order_report_paths = filter_paths_by_period(list_matching_files(directory, [], [".txt"]), period_start, period_end)
     ads_paths = filter_paths_by_period(list_matching_files(directory, ["広告"], [".xlsx"]), period_start, period_end)
-    use_order_reports_only = bool(order_report_paths)
-    if use_order_reports_only:
+    has_order_reports = bool(order_report_paths)
+    if has_order_reports:
         transactions_paths = []
 
     if business_paths:
@@ -541,6 +548,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                     "id": f"amazon-{slugify(family_name)}",
                     "marketplace": "amazon",
                     "name": family_name,
+                    "parentAsin": parent or None,
                     "summary": {
                         "sales": 0.0,
                         "orders": 0.0,
@@ -560,16 +568,20 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                     "limitations": [],
                     "_aliases": set(),
                     "_orders": set(),
+                    "_hasBusinessSnapshot": True,
                     "_timeline": defaultdict(lambda: {"sales": 0.0, "orders": set(), "units": 0.0}),
                 },
             )
+            detail["_hasBusinessSnapshot"] = True
+            if parent and not normalize_spaces(str(detail.get("parentAsin") or "")):
+                detail["parentAsin"] = parent
             if len(family_name) < len(detail["name"]):
                 detail["name"] = family_name
             title = row.get("タイトル", "").strip()
             variant_meta = parse_amazon_variant(title, family_name)
-            sales = 0.0 if use_order_reports_only else parse_number(row.get("注文商品の売上額"))
-            units = 0.0 if use_order_reports_only else parse_number(row.get("注文品目総数"))
-            orders = 0.0 if use_order_reports_only else parse_number(row.get("注文された商品点数"))
+            sales = parse_number(row.get("注文商品の売上額"))
+            units = parse_number(row.get("注文品目総数"))
+            orders = parse_number(row.get("注文された商品点数"))
             sessions = parse_number(row.get("セッション数 - 合計"))
             detail["summary"]["sales"] += sales
             detail["summary"]["orders"] += orders
@@ -592,11 +604,12 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                     "conversionRate": round_metric(parse_percentage(row.get("ユニットセッション率"))),
                     "childAsin": child or None,
                     "sku": None,
+                    "_hasBusinessSnapshot": True,
                     "timeline": [],
                     "timelineAvailable": False,
                     "timelineReason": (
                         "Amazon の注文レポートから日別推移を生成します。"
-                        if use_order_reports_only
+                        if has_order_reports
                         else "Amazon の取引CSVが無いため、このSKUの日別推移は未表示です。"
                     ),
                     "_timeline": defaultdict(lambda: {"sales": 0.0, "units": 0.0}),
@@ -655,6 +668,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 "id": f"amazon-{slugify(family_name)}",
                 "marketplace": "amazon",
                 "name": family_name,
+                "parentAsin": None,
                 "summary": {
                     "sales": 0.0,
                     "orders": 0.0,
@@ -674,6 +688,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 "limitations": [],
                 "_aliases": set(),
                 "_orders": set(),
+                "_hasBusinessSnapshot": False,
                 "_timeline": defaultdict(lambda: {"sales": 0.0, "orders": set(), "units": 0.0}),
             },
         )
@@ -724,6 +739,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             "conversionRate": None,
             "childAsin": asin or None,
             "sku": normalized_sku or None,
+            "_hasBusinessSnapshot": False,
             "timeline": [],
             "timelineAvailable": False,
             "timelineReason": "Amazon の注文レポートから日別推移を生成します。",
@@ -912,10 +928,10 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 "amazon_transactions",
                 "Amazon 取引CSV",
                 None,
-                "ignored" if use_order_reports_only else "missing",
+                "ignored" if has_order_reports else "missing",
                 0,
                 "注文レポートTXTを優先するため、取引CSVは使っていません。"
-                if use_order_reports_only
+                if has_order_reports
                 else "取引CSVが見つかりませんでした。",
                 paths=[],
             )
@@ -998,7 +1014,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             }
             for date, values in sorted(detail["_timeline"].items())
         ]
-        if detail["_orders"]:
+        if detail["_orders"] and not detail.get("_hasBusinessSnapshot"):
             detail["summary"]["sales"] = round(sum(point["sales"] for point in detail["timeline"]), 2)
             detail["summary"]["orders"] = len(detail["_orders"])
             detail["summary"]["units"] = round(
@@ -1018,7 +1034,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 }
                 for date, values in sorted(variant.get("_timeline", {}).items())
             ]
-            if variant["timeline"]:
+            if variant["timeline"] and not variant.get("_hasBusinessSnapshot"):
                 variant["sales"] = round(sum(point["sales"] for point in variant["timeline"]), 2)
                 variant["units"] = round(sum(point["units"] for point in variant["timeline"]), 2)
             if variant["timeline"]:
@@ -1028,12 +1044,15 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 variant["timelineAvailable"] = False
                 variant["timelineReason"] = "このSKUに紐づく Amazon 取引が見つからず、日別推移は表示していません。"
             variant.pop("_timeline", None)
+            variant.pop("_hasBusinessSnapshot", None)
         has_descriptive_peer = any(
             normalize_spaces(str(variant.get("size") or "")) or normalize_spaces(str(variant.get("color") or ""))
             for variant in detail["variants"]
         )
         detail["variants"] = [
-            variant for variant in detail["variants"] if should_keep_amazon_variant(variant, has_descriptive_peer)
+            variant
+            for variant in detail["variants"]
+            if should_keep_amazon_variant(variant, has_descriptive_peer, detail.get("parentAsin"))
         ]
         detail["summary"]["conversionRate"] = round_metric(
             safe_div(detail["summary"]["units"], detail["summary"]["sessions"])
@@ -1054,9 +1073,11 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
         detail.pop("_aliases", None)
         detail.pop("_orders", None)
         detail.pop("_timeline", None)
+        detail.pop("_hasBusinessSnapshot", None)
+        detail.pop("parentAsin", None)
 
-    total_sales = sum(day["sales"] for day in timeline.values())
-    total_orders = len(order_line_counts)
+    total_sales = sum(detail["summary"]["sales"] for detail in families.values())
+    total_orders = round(sum(detail["summary"]["orders"] for detail in families.values()), 2)
     total_units = sum(detail["summary"]["units"] for detail in families.values())
     total_ad_cost = sum(day["adCost"] for day in timeline.values())
     total_fees = sum(day["fees"] for day in timeline.values())
