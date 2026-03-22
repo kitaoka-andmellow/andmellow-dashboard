@@ -193,8 +193,73 @@ function buildVariantTimelineSeries(variant) {
   });
 }
 
+function buildAggregateVariant(detail) {
+  const timelineMap = new Map();
+  let hasAnyTimeline = false;
+
+  (detail?.variants || []).forEach((variant) => {
+    if (!variant?.timelineAvailable || !variant.timeline?.length) {
+      return;
+    }
+    hasAnyTimeline = true;
+    variant.timeline.forEach((item) => {
+      const current = timelineMap.get(item.date) || { sales: 0, units: 0 };
+      current.sales += item.sales || 0;
+      current.units += item.units || 0;
+      timelineMap.set(item.date, current);
+    });
+  });
+
+  return {
+    id: "__aggregate_all__",
+    label: "全SKU合計",
+    sales: detail?.summary?.sales || 0,
+    units: detail?.summary?.units || 0,
+    timelineAvailable: hasAnyTimeline,
+    timelineReason: hasAnyTimeline
+      ? null
+      : "この商品のSKU日別データが無いため、全SKU合計の推移は表示できません。",
+    timeline: Array.from(timelineMap.entries())
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([date, values]) => ({
+        date,
+        sales: Math.round((values.sales || 0) * 100) / 100,
+        units: Math.round((values.units || 0) * 100) / 100,
+      })),
+  };
+}
+
+function buildChartTicks(series) {
+  if (!series.length) return [];
+  if (series.length === 1) {
+    return [
+      {
+        date: series[0].date,
+        label: formatDateLabel(series[0].date),
+        position: 50,
+        edge: "single",
+      },
+    ];
+  }
+
+  const desiredTickCount = Math.min(series.length, 5);
+  const indexes = new Set();
+  for (let index = 0; index < desiredTickCount; index += 1) {
+    indexes.add(Math.round(((series.length - 1) * index) / (desiredTickCount - 1)));
+  }
+
+  return Array.from(indexes)
+    .sort((left, right) => left - right)
+    .map((index) => ({
+      date: series[index].date,
+      label: formatDateLabel(series[index].date),
+      position: (index / (series.length - 1)) * 100,
+      edge: index === 0 ? "start" : index === series.length - 1 ? "end" : null,
+    }));
+}
+
 function buildLineChart(series, key, stroke, formatter, label) {
-  const width = 720;
+  const width = Math.max(720, series.length * 42);
   const height = 190;
   const padding = { top: 16, right: 12, bottom: 22, left: 12 };
   const plotWidth = width - padding.left - padding.right;
@@ -203,6 +268,7 @@ function buildLineChart(series, key, stroke, formatter, label) {
   const total = values.reduce((sum, value) => sum + value, 0);
   const maxValue = Math.max(...values, 1);
   const step = series.length > 1 ? plotWidth / (series.length - 1) : 0;
+  const ticks = buildChartTicks(series);
   const points = series.map((item, index) => {
     const x = padding.left + step * index;
     const y = padding.top + plotHeight - ((item[key] || 0) / maxValue) * plotHeight;
@@ -214,6 +280,19 @@ function buildLineChart(series, key, stroke, formatter, label) {
     .filter((_, index) => series.length <= 14 || index === 0 || index === series.length - 1)
     .map((point) => `<circle cx="${point[0]}" cy="${point[1]}" r="3" fill="${stroke}"></circle>`)
     .join("");
+  const guides = ticks
+    .map((tick) => {
+      const x = padding.left + (plotWidth * tick.position) / 100;
+      return `<line x1="${x}" y1="${padding.top}" x2="${x}" y2="${padding.top + plotHeight}" stroke="rgba(27,39,57,0.07)" stroke-width="1"></line>`;
+    })
+    .join("");
+  const axis = ticks
+    .map((tick) => {
+      const edgeClass = tick.edge ? ` is-${tick.edge}` : "";
+      const positionStyle = tick.edge ? "" : `style="left:${tick.position}%;"`;
+      return `<span class="variant-axis-tick${edgeClass}" ${positionStyle}>${escapeHtml(tick.label)}</span>`;
+    })
+    .join("");
   return `
     <section class="variant-chart-card">
       <div class="variant-chart-head">
@@ -222,15 +301,13 @@ function buildLineChart(series, key, stroke, formatter, label) {
       </div>
       <svg class="variant-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${label}">
         <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${padding.left + plotWidth}" y2="${padding.top + plotHeight}" stroke="rgba(27,39,57,0.12)" stroke-width="1"></line>
+        ${guides}
         <text x="${padding.left + plotWidth}" y="${padding.top + 10}" text-anchor="end" fill="#6d7381" font-size="12">${escapeHtml(formatter(maxValue))}</text>
         <path d="${areaPath}" fill="${stroke}" opacity="0.14"></path>
         <path d="${linePath}" fill="none" stroke="${stroke}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
         ${circles}
       </svg>
-      <div class="variant-chart-axis">
-        <span>${escapeHtml(formatDateLabel(series[0]?.date))}</span>
-        <span>${escapeHtml(formatDateLabel(series[series.length - 1]?.date))}</span>
-      </div>
+      <div class="variant-chart-axis">${axis}</div>
     </section>
   `;
 }
@@ -243,7 +320,10 @@ function closeVariantModal() {
 
 function openVariantModal(variantId) {
   const detail = getSelectedDetail();
-  const variant = detail?.variants?.find((item) => item.id === variantId);
+  const variant =
+    variantId === "__aggregate_all__"
+      ? buildAggregateVariant(detail)
+      : detail?.variants?.find((item) => item.id === variantId);
   if (!detail || !variant) return;
   state.activeVariantId = variantId;
   const timeline = buildVariantTimelineSeries(variant);
@@ -611,7 +691,7 @@ function buildHeatmap(detail) {
           <tr>
             <th class="heatmap-axis">合計</th>
             ${footerCells}
-            <td class="heatmap-total">
+            <td class="heatmap-total is-clickable" data-variant-id="__aggregate_all__">
               <div class="heatmap-sales">${formatCurrency(detail.summary.sales)}</div>
               <div class="heatmap-units">${formatNumber(detail.summary.units)}点</div>
             </td>

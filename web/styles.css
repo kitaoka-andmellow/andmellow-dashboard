@@ -559,7 +559,8 @@ body {
   cursor: pointer;
 }
 
-.heatmap-cell.is-clickable:hover {
+.heatmap-cell.is-clickable:hover,
+.heatmap-total.is-clickable:hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 24px rgba(160, 44, 92, 0.16);
 }
@@ -590,6 +591,10 @@ body {
 
 .heatmap-total {
   background: rgba(24, 37, 56, 0.06);
+}
+
+.heatmap-total.is-clickable {
+  cursor: pointer;
 }
 
 tfoot .heatmap-axis {
@@ -774,12 +779,33 @@ tfoot .heatmap-axis {
 }
 
 .variant-chart-axis {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.5rem;
+  position: relative;
+  min-height: 1rem;
   margin-top: 0.35rem;
   color: var(--muted);
   font-size: 0.68rem;
+}
+
+.variant-axis-tick {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.variant-axis-tick.is-start {
+  left: 0;
+  transform: none;
+}
+
+.variant-axis-tick.is-end {
+  right: 0;
+  left: auto;
+  transform: none;
+}
+
+.variant-axis-tick.is-single {
+  left: 50%;
 }
 
 .variant-empty {
