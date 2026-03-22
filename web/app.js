@@ -3,24 +3,35 @@ const state = {
   marketplace: "all",
   query: "",
   selectedId: null,
+  activeVariantId: null,
   authConfig: null,
   session: null,
   availableRange: null,
-  periodStart: null,
-  periodEnd: null,
+  appliedPeriodStart: null,
+  appliedPeriodEnd: null,
+  draftPeriodStart: null,
+  draftPeriodEnd: null,
 };
 
 const AUTO_REFRESH_MS = 60000;
+const MARKETPLACE_META = {
+  amazon: { label: "Amazon", logo: "/amazon-logo.png" },
+  rakuten: { label: "Rakuten", logo: "/rakuten-logo.png" },
+};
 
 const elements = {
   summaryStrip: document.getElementById("summaryStrip"),
   productList: document.getElementById("productList"),
   detailRoot: document.getElementById("detailRoot"),
-  refreshButton: document.getElementById("refreshButton"),
   searchInput: document.getElementById("searchInput"),
   marketplaceFilters: document.getElementById("marketplaceFilters"),
   periodStart: document.getElementById("periodStart"),
   periodEnd: document.getElementById("periodEnd"),
+  applyButton: document.getElementById("applyButton"),
+  variantModal: document.getElementById("variantModal"),
+  variantModalBackdrop: document.getElementById("variantModalBackdrop"),
+  variantModalContent: document.getElementById("variantModalContent"),
+  variantModalClose: document.getElementById("variantModalClose"),
   authOverlay: document.getElementById("authOverlay"),
   authMessage: document.getElementById("authMessage"),
   googleSignIn: document.getElementById("googleSignIn"),
@@ -67,6 +78,10 @@ function toIsoDate(year, month, day) {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
+function isoFromDate(date) {
+  return toIsoDate(date.getFullYear(), date.getMonth() + 1, date.getDate());
+}
+
 function extractDateRangeFromPath(path) {
   if (!path) return null;
   const compact = path.match(/(20\d{2})(\d{2})(\d{2})_(20\d{2})(\d{2})(\d{2})/);
@@ -102,29 +117,182 @@ function deriveAvailableRange(data) {
 }
 
 function selectedRangeHasData() {
-  if (!state.availableRange || !state.periodStart || !state.periodEnd) return true;
-  return !(state.periodEnd < state.availableRange.start || state.periodStart > state.availableRange.end);
+  if (!state.availableRange || !state.appliedPeriodStart || !state.appliedPeriodEnd) return true;
+  return !(state.appliedPeriodEnd < state.availableRange.start || state.appliedPeriodStart > state.availableRange.end);
+}
+
+function buildDashboardUrl() {
+  const params = new URLSearchParams();
+  if (state.appliedPeriodStart) params.set("start", state.appliedPeriodStart);
+  if (state.appliedPeriodEnd) params.set("end", state.appliedPeriodEnd);
+  const query = params.toString();
+  return query ? `/api/dashboard?${query}` : "/api/dashboard";
+}
+
+function syncPeriodInputs() {
+  elements.periodStart.value = state.draftPeriodStart || "";
+  elements.periodEnd.value = state.draftPeriodEnd || "";
+}
+
+function getSelectedDetail() {
+  return state.data?.productDetails?.[state.selectedId] || null;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function isoDateRange(start, end) {
+  if (!start || !end) return [];
+  const dates = [];
+  let cursor = parseDateValue(start);
+  const limit = parseDateValue(end);
+  if (!cursor || !limit) return dates;
+  while (cursor <= limit) {
+    dates.push(isoFromDate(cursor));
+    cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return dates;
+}
+
+function buildVariantTimelineSeries(variant) {
+  const source = new Map((variant?.timeline || []).map((item) => [item.date, item]));
+  const dates = isoDateRange(
+    state.appliedPeriodStart || variant?.timeline?.[0]?.date,
+    state.appliedPeriodEnd || variant?.timeline?.[variant.timeline.length - 1]?.date
+  );
+  if (!dates.length) {
+    return (variant?.timeline || []).map((item) => ({
+      date: item.date,
+      sales: item.sales || 0,
+      units: item.units || 0,
+    }));
+  }
+  return dates.map((date) => {
+    const item = source.get(date);
+    return {
+      date,
+      sales: item?.sales || 0,
+      units: item?.units || 0,
+    };
+  });
+}
+
+function buildLineChart(series, key, stroke, formatter, label) {
+  const width = 720;
+  const height = 190;
+  const padding = { top: 16, right: 12, bottom: 22, left: 12 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const values = series.map((item) => item[key] || 0);
+  const total = values.reduce((sum, value) => sum + value, 0);
+  const maxValue = Math.max(...values, 1);
+  const step = series.length > 1 ? plotWidth / (series.length - 1) : 0;
+  const points = series.map((item, index) => {
+    const x = padding.left + step * index;
+    const y = padding.top + plotHeight - ((item[key] || 0) / maxValue) * plotHeight;
+    return [x, y];
+  });
+  const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"}${point[0]},${point[1]}`).join(" ");
+  const areaPath = `${linePath} L${padding.left + plotWidth},${padding.top + plotHeight} L${padding.left},${padding.top + plotHeight} Z`;
+  const circles = points
+    .filter((_, index) => series.length <= 14 || index === 0 || index === series.length - 1)
+    .map((point) => `<circle cx="${point[0]}" cy="${point[1]}" r="3" fill="${stroke}"></circle>`)
+    .join("");
+  return `
+    <section class="variant-chart-card">
+      <div class="variant-chart-head">
+        <span class="variant-chart-label">${label}</span>
+        <strong class="variant-chart-value">${formatter(total)}</strong>
+      </div>
+      <svg class="variant-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${label}">
+        <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${padding.left + plotWidth}" y2="${padding.top + plotHeight}" stroke="rgba(27,39,57,0.12)" stroke-width="1"></line>
+        <text x="${padding.left + plotWidth}" y="${padding.top + 10}" text-anchor="end" fill="#6d7381" font-size="12">${escapeHtml(formatter(maxValue))}</text>
+        <path d="${areaPath}" fill="${stroke}" opacity="0.14"></path>
+        <path d="${linePath}" fill="none" stroke="${stroke}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
+        ${circles}
+      </svg>
+      <div class="variant-chart-axis">
+        <span>${escapeHtml(formatDateLabel(series[0]?.date))}</span>
+        <span>${escapeHtml(formatDateLabel(series[series.length - 1]?.date))}</span>
+      </div>
+    </section>
+  `;
+}
+
+function closeVariantModal() {
+  state.activeVariantId = null;
+  elements.variantModal.classList.add("is-hidden");
+  elements.variantModalContent.innerHTML = "";
+}
+
+function openVariantModal(variantId) {
+  const detail = getSelectedDetail();
+  const variant = detail?.variants?.find((item) => item.id === variantId);
+  if (!detail || !variant) return;
+  state.activeVariantId = variantId;
+  const timeline = buildVariantTimelineSeries(variant);
+  const hasTimeline = variant.timelineAvailable && timeline.length > 0;
+  elements.variantModalContent.innerHTML = `
+    <header class="variant-modal-header">
+      <div class="variant-modal-kicker">${escapeHtml(detail.name)}</div>
+      <h3 class="variant-modal-title">${escapeHtml(variant.label || "未設定")}</h3>
+      <div class="variant-modal-meta">
+        <span class="variant-modal-chip">売上 ${escapeHtml(formatCurrency(variant.sales))}</span>
+        <span class="variant-modal-chip">個数 ${escapeHtml(formatNumber(variant.units))}</span>
+        <span class="variant-modal-chip">${escapeHtml(
+          state.appliedPeriodStart && state.appliedPeriodEnd
+            ? `${formatDateLabel(state.appliedPeriodStart)} - ${formatDateLabel(state.appliedPeriodEnd)}`
+            : "-"
+        )}</span>
+      </div>
+    </header>
+    ${
+      hasTimeline
+        ? `<div class="variant-chart-grid">
+            ${buildLineChart(timeline, "units", "#b63b6a", formatNumber, "日別個数")}
+            ${buildLineChart(timeline, "sales", "#7d2446", formatCurrency, "日別売上")}
+          </div>`
+        : `<div class="variant-empty">${escapeHtml(variant.timelineReason || "このSKUの日別データはありません。")}</div>`
+    }
+  `;
+  elements.variantModal.classList.remove("is-hidden");
 }
 
 function resolveColor(label) {
   const value = (label || "").toLowerCase();
   const palette = [
-    { test: /ブラック|black|黒/, color: "#111111" },
-    { test: /ホワイト|white|白|アイボリー/, color: "#f4f4f4" },
-    { test: /グレー|gray|grey|杢/, color: "#8f8f8f" },
-    { test: /ベージュ|beige|エクリュ|肌/, color: "#d8c2a1" },
-    { test: /モカ|moca|ブラウン|brown|茶|キャメル/, color: "#8a6a52" },
-    { test: /ネイビー|navy/, color: "#2a3b59" },
-    { test: /ブルー|blue|青|アッシュブルー/, color: "#6d8eb8" },
-    { test: /グリーン|green|緑|カーキ|ペールグリーン/, color: "#7a9b7e" },
-    { test: /レッド|red|赤|ワイン|ボルドー/, color: "#b84a4a" },
-    { test: /ピンク|pink/, color: "#d994a8" },
-    { test: /パープル|purple|紫|ラベンダー/, color: "#9a89b8" },
-    { test: /イエロー|yellow|黄|マスタード/, color: "#d8b44f" },
-    { test: /オレンジ|orange/, color: "#d5884f" },
+    { test: /ブラック|black|黒/, color: "#121212" },
+    { test: /ホワイト|white|白|アイボリー/, color: "#fffdf7" },
+    { test: /グレー|gray|grey|杢/, color: "#8b93a0" },
+    { test: /ベージュ|beige|エクリュ|肌/, color: "#e0ba84" },
+    { test: /モカ|moca|ブラウン|brown|茶|キャメル/, color: "#95623d" },
+    { test: /ネイビー|navy/, color: "#234a8f" },
+    { test: /ブルー|blue|青|アッシュブルー/, color: "#2f80ed" },
+    { test: /グリーン|green|緑|カーキ|ペールグリーン/, color: "#1fa56b" },
+    { test: /レッド|red|赤|ワイン|ボルドー/, color: "#d63a4c" },
+    { test: /ピンク|pink/, color: "#ff5fa2" },
+    { test: /パープル|purple|紫|ラベンダー/, color: "#8c5bff" },
+    { test: /イエロー|yellow|黄|マスタード/, color: "#f4c430" },
+    { test: /オレンジ|orange/, color: "#ff8a3d" },
   ];
   const matched = palette.find((entry) => entry.test.test(value));
-  return matched?.color || "#d7d7d7";
+  return matched?.color || "#c8a0ab";
+}
+
+function renderMarketplaceBadge(marketplace) {
+  const meta = MARKETPLACE_META[marketplace];
+  if (!meta) return "";
+  return `
+    <span class="market-badge ${marketplace}" aria-label="${meta.label}">
+      <img class="market-logo" src="${meta.logo}" alt="${meta.label}" />
+    </span>
+  `;
 }
 
 function updateAuthStatus() {
@@ -271,6 +439,7 @@ function buildHeatmap(detail) {
     : ["未設定"];
 
   const matrix = new Map();
+  const variantsByCell = new Map();
   detail.variants.forEach((variant) => {
     const size = variant.size || "未設定";
     const color = variant.color || "未設定";
@@ -279,6 +448,7 @@ function buildHeatmap(detail) {
     current.sales += variant.sales || 0;
     current.units += variant.units || 0;
     matrix.set(key, current);
+    variantsByCell.set(key, variant);
   });
 
   const rowTotals = new Map();
@@ -329,10 +499,18 @@ function buildHeatmap(detail) {
         .map((color) => {
           const key = `${size}__${color}`;
           const value = matrix.get(key) || { sales: 0, units: 0 };
-          const intensity = maxSales ? 0.06 + (value.sales / maxSales) * 0.44 : 0.03;
+          const ratio = maxSales ? value.sales / maxSales : 0;
+          const intensity = 0.08 + ratio * 0.92;
+          const textColor = intensity >= 0.48 ? "#ffffff" : "#5f2940";
           const swatch = resolveColor(color);
+          const variant = variantsByCell.get(key);
+          const clickable = Boolean(variant);
           return `
-            <td class="heatmap-cell" style="background:rgba(0,0,0,${intensity.toFixed(3)}); --cell-color:${swatch};">
+            <td
+              class="heatmap-cell ${clickable ? "is-clickable" : ""}"
+              ${clickable ? `data-variant-id="${escapeHtml(variant.id)}"` : ""}
+              style="background:rgba(214,58,106,${intensity.toFixed(3)}); --cell-color:${swatch}; --cell-text:${textColor};"
+            >
               <div class="heatmap-sales">${formatCurrency(value.sales || 0)}</div>
               <div class="heatmap-units">${formatNumber(value.units || 0)}点</div>
             </td>
@@ -406,7 +584,9 @@ function renderSummary() {
   const totalSales = products.reduce((sum, product) => sum + product.sales, 0);
   const totalUnits = products.reduce((sum, product) => sum + product.units, 0);
   const periodLabel =
-    state.periodStart && state.periodEnd ? `${formatDateLabel(state.periodStart)} - ${formatDateLabel(state.periodEnd)}` : "-";
+    state.appliedPeriodStart && state.appliedPeriodEnd
+      ? `${formatDateLabel(state.appliedPeriodStart)} - ${formatDateLabel(state.appliedPeriodEnd)}`
+      : "-";
   elements.summaryStrip.innerHTML = `
     <div class="summary-chip">商品数<strong>${formatNumber(products.length)}</strong></div>
     <div class="summary-chip">売上<strong>${formatCurrency(totalSales)}</strong></div>
@@ -433,7 +613,7 @@ function renderProductList() {
         <article class="product-card ${product.id === state.selectedId ? "is-active" : ""}" data-product-id="${product.id}">
           <div class="product-card-top">
             <div class="product-name">${product.name}</div>
-            <span class="market-badge ${product.marketplace}">${product.marketplace === "amazon" ? "Amazon" : "楽天"}</span>
+            ${renderMarketplaceBadge(product.marketplace)}
           </div>
           <div class="product-meta">
             <span>売上 ${formatCurrency(product.sales)}</span>
@@ -446,6 +626,7 @@ function renderProductList() {
 
   elements.productList.querySelectorAll("[data-product-id]").forEach((card) => {
     card.addEventListener("click", () => {
+      closeVariantModal();
       state.selectedId = card.dataset.productId;
       renderProductList();
       renderDetail();
@@ -497,12 +678,10 @@ function renderDetail() {
     return;
   }
 
-  const marketLabel = detail.marketplace === "amazon" ? "Amazon" : "楽天";
-
   elements.detailRoot.innerHTML = `
     <div class="detail-header">
       <div class="detail-title-wrap">
-        <span class="market-badge ${detail.marketplace}">${marketLabel}</span>
+        ${renderMarketplaceBadge(detail.marketplace)}
         <h2 class="detail-title">${detail.name}</h2>
       </div>
     </div>
@@ -534,6 +713,12 @@ function renderDetail() {
       </section>
     </div>
   `;
+
+  elements.detailRoot.querySelectorAll("[data-variant-id]").forEach((cell) => {
+    cell.addEventListener("click", () => {
+      openVariantModal(cell.dataset.variantId);
+    });
+  });
 }
 
 function render() {
@@ -547,10 +732,11 @@ async function loadDashboard() {
     return;
   }
 
-  elements.refreshButton.disabled = true;
-  elements.refreshButton.textContent = "更新中";
+  closeVariantModal();
+  elements.applyButton.disabled = true;
+  elements.applyButton.textContent = "反映中";
   try {
-    const response = await fetch("/api/dashboard", {
+    const response = await fetch(buildDashboardUrl(), {
       cache: "no-store",
       credentials: "same-origin",
     });
@@ -562,18 +748,27 @@ async function loadDashboard() {
     }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     state.data = await response.json();
-    state.availableRange = deriveAvailableRange(state.data);
+    const derivedRange = deriveAvailableRange(state.data);
+    if (!state.availableRange) {
+      state.availableRange = derivedRange;
+    } else if (derivedRange) {
+      state.availableRange = {
+        start: derivedRange.start < state.availableRange.start ? derivedRange.start : state.availableRange.start,
+        end: derivedRange.end > state.availableRange.end ? derivedRange.end : state.availableRange.end,
+      };
+    }
     if (state.availableRange) {
-      if (!state.periodStart) state.periodStart = state.availableRange.start;
-      if (!state.periodEnd) state.periodEnd = state.availableRange.end;
+      if (!state.appliedPeriodStart) state.appliedPeriodStart = state.availableRange.start;
+      if (!state.appliedPeriodEnd) state.appliedPeriodEnd = state.availableRange.end;
+      if (!state.draftPeriodStart) state.draftPeriodStart = state.appliedPeriodStart;
+      if (!state.draftPeriodEnd) state.draftPeriodEnd = state.appliedPeriodEnd;
       elements.periodStart.disabled = false;
       elements.periodEnd.disabled = false;
       elements.periodStart.min = state.availableRange.start;
       elements.periodStart.max = state.availableRange.end;
       elements.periodEnd.min = state.availableRange.start;
       elements.periodEnd.max = state.availableRange.end;
-      elements.periodStart.value = state.periodStart;
-      elements.periodEnd.value = state.periodEnd;
+      syncPeriodInputs();
     } else {
       elements.periodStart.disabled = true;
       elements.periodEnd.disabled = true;
@@ -586,8 +781,8 @@ async function loadDashboard() {
   } catch (error) {
     elements.detailRoot.innerHTML = `<div class="empty-state">${error.message}</div>`;
   } finally {
-    elements.refreshButton.disabled = false;
-    elements.refreshButton.textContent = "更新";
+    elements.applyButton.disabled = false;
+    elements.applyButton.textContent = "反映";
   }
 }
 
@@ -611,21 +806,25 @@ elements.searchInput.addEventListener("input", (event) => {
 });
 
 elements.periodStart.addEventListener("input", (event) => {
-  state.periodStart = event.target.value || state.availableRange?.start || null;
-  if (state.periodEnd && state.periodStart && state.periodStart > state.periodEnd) {
-    state.periodEnd = state.periodStart;
-    elements.periodEnd.value = state.periodEnd;
+  state.draftPeriodStart = event.target.value || state.availableRange?.start || null;
+  if (state.draftPeriodEnd && state.draftPeriodStart && state.draftPeriodStart > state.draftPeriodEnd) {
+    state.draftPeriodEnd = state.draftPeriodStart;
+    elements.periodEnd.value = state.draftPeriodEnd;
   }
-  render();
 });
 
 elements.periodEnd.addEventListener("input", (event) => {
-  state.periodEnd = event.target.value || state.availableRange?.end || null;
-  if (state.periodStart && state.periodEnd && state.periodEnd < state.periodStart) {
-    state.periodStart = state.periodEnd;
-    elements.periodStart.value = state.periodStart;
+  state.draftPeriodEnd = event.target.value || state.availableRange?.end || null;
+  if (state.draftPeriodStart && state.draftPeriodEnd && state.draftPeriodEnd < state.draftPeriodStart) {
+    state.draftPeriodStart = state.draftPeriodEnd;
+    elements.periodStart.value = state.draftPeriodStart;
   }
-  render();
+});
+
+elements.applyButton.addEventListener("click", () => {
+  state.appliedPeriodStart = state.draftPeriodStart || state.availableRange?.start || null;
+  state.appliedPeriodEnd = state.draftPeriodEnd || state.availableRange?.end || null;
+  loadDashboard();
 });
 
 elements.marketplaceFilters.querySelectorAll("[data-marketplace]").forEach((button) => {
@@ -638,12 +837,22 @@ elements.marketplaceFilters.querySelectorAll("[data-marketplace]").forEach((butt
   });
 });
 
-elements.refreshButton.addEventListener("click", () => {
-  loadDashboard();
-});
-
 elements.logoutButton.addEventListener("click", () => {
   logout();
+});
+
+elements.variantModalClose.addEventListener("click", () => {
+  closeVariantModal();
+});
+
+elements.variantModalBackdrop.addEventListener("click", () => {
+  closeVariantModal();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !elements.variantModal.classList.contains("is-hidden")) {
+    closeVariantModal();
+  }
 });
 
 async function bootstrap() {

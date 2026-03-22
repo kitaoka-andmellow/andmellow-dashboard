@@ -7,6 +7,7 @@ from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from eanalytics import build_dashboard
 from eanalytics.auth import (
@@ -25,7 +26,7 @@ from eanalytics.auth import (
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT / "web"
 DATA_ROOT = Path(os.environ.get("DATA_ROOT", str(ROOT))).expanduser().resolve()
-STATIC_ROOT_FILES = {"logo.png"}
+STATIC_ROOT_FILES = {"logo.png", "favicon.ico", "amazon-logo.png", "rakuten-logo.png"}
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -77,7 +78,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         return str(WEB_ROOT / relative)
 
     def do_GET(self) -> None:
-        route = self.path.split("?", 1)[0]
+        parsed = urlsplit(self.path)
+        route = parsed.path
+        query = parse_qs(parsed.query)
         if route == "/healthz":
             body = b"ok"
             self.send_response(HTTPStatus.OK)
@@ -104,7 +107,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             session = self.require_session()
             if AUTH_REQUIRED and session is None:
                 return
-            payload = build_dashboard(DATA_ROOT)
+            period_start = query.get("start", [None])[0]
+            period_end = query.get("end", [None])[0]
+            payload = build_dashboard(DATA_ROOT, period_start=period_start, period_end=period_end)
             self.send_json(payload)
             return
         return super().do_GET()

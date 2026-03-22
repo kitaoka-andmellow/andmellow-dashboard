@@ -32,8 +32,94 @@ def round_metric(value: float | None) -> float | None:
     return round(value, 4)
 
 
+def size_sort_key(label: str | None) -> tuple[int, int, float, str]:
+    text = normalize_spaces(str(label or "")) or "未設定"
+    upper = text.upper().replace("サイズ", "").replace(" ", "")
+    if text == "未設定":
+        return (3, 999, 0.0, text)
+
+    pure_number = re.fullmatch(r"(\d+(?:\.\d+)?)", upper)
+    if pure_number:
+        return (0, 0, float(pure_number.group(1)), text)
+
+    alpha_order = {
+        "XXXS": 0,
+        "3XS": 0,
+        "XXS": 1,
+        "2XS": 1,
+        "XS": 2,
+        "SS": 3,
+        "S": 4,
+        "M": 5,
+        "L": 6,
+        "LL": 7,
+        "XL": 7,
+        "2L": 8,
+        "2XL": 8,
+        "XXL": 8,
+        "3L": 9,
+        "3XL": 9,
+        "XXXL": 9,
+        "4L": 10,
+        "4XL": 10,
+        "XXXXL": 10,
+        "5L": 11,
+        "5XL": 11,
+    }
+    if upper in alpha_order:
+        return (1, alpha_order[upper], 0.0, text)
+
+    prefixed_number = re.fullmatch(r"(\d+)(XL|L)", upper)
+    if prefixed_number:
+        number = int(prefixed_number.group(1))
+        suffix = prefixed_number.group(2)
+        rank = 6 + number if suffix == "L" else 6 + number
+        return (1, rank, 0.0, text)
+
+    return (2, 0, 0.0, text)
+
+
 def strip_trailing_variant(title: str) -> str:
     return normalize_spaces(re.sub(r"\([^)]*\)\s*$", "", title or ""))
+
+
+def variant_value(value: str | None) -> str:
+    return normalize_spaces(str(value or "")).lower()
+
+
+def to_iso_date(year: str, month: str, day: str) -> str:
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+
+
+def extract_date_range_from_path(path: Path | str) -> tuple[str, str] | None:
+    text = str(path)
+    compact = re.search(r"(20\d{2})(\d{2})(\d{2})_(20\d{2})(\d{2})(\d{2})", text)
+    if compact:
+        return (
+            to_iso_date(compact.group(1), compact.group(2), compact.group(3)),
+            to_iso_date(compact.group(4), compact.group(5), compact.group(6)),
+        )
+    loose = re.search(r"(20\d{2})_(\d{1,2})_(\d{1,2})[～〜-](20\d{2})_(\d{1,2})_(\d{1,2})", text)
+    if loose:
+        return (
+            to_iso_date(loose.group(1), loose.group(2), loose.group(3)),
+            to_iso_date(loose.group(4), loose.group(5), loose.group(6)),
+        )
+    return None
+
+
+def path_matches_period(path: Path, period_start: str | None, period_end: str | None) -> bool:
+    if not period_start or not period_end:
+        return True
+    date_range = extract_date_range_from_path(path)
+    if not date_range:
+        return True
+    start, end = date_range
+    return not (end < period_start or start > period_end)
+
+
+def filter_paths_by_period(paths: list[Path], period_start: str | None, period_end: str | None) -> list[Path]:
+    return [path for path in paths if path_matches_period(path, period_start, period_end)]
 
 
 def parse_amazon_variant(title: str, fallback: str = "") -> dict[str, str | None]:
@@ -61,6 +147,41 @@ def parse_amazon_variant(title: str, fallback: str = "") -> dict[str, str | None
     }
 
 
+def parse_transaction_units(row: dict[str, str]) -> float:
+    for key in ("数量", "商品数量", "出荷数", "注文品目総数", "個数"):
+        value = parse_number(row.get(key))
+        if value:
+            return value
+    return 1.0
+
+
+def match_amazon_variant(detail: dict[str, Any], product_detail: str) -> dict[str, Any] | None:
+    variants = detail.get("variants", [])
+    if not variants:
+        return None
+    if len(variants) == 1:
+        return variants[0]
+
+    parsed = parse_amazon_variant(product_detail, detail.get("name", ""))
+    parsed_size = variant_value(parsed.get("size"))
+    parsed_color = variant_value(parsed.get("color"))
+    if parsed_size or parsed_color:
+        candidates = [
+            variant
+            for variant in variants
+            if (not parsed_size or variant_value(variant.get("size")) == parsed_size)
+            and (not parsed_color or variant_value(variant.get("color")) == parsed_color)
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+
+    normalized_detail = normalize_spaces(product_detail)
+    for variant in variants:
+        if normalize_spaces(variant.get("title", "")) == normalized_detail:
+            return variant
+    return None
+
+
 def clean_rakuten_variant_text(value: str | None) -> str | None:
     if not value:
         return None
@@ -70,17 +191,40 @@ def clean_rakuten_variant_text(value: str | None) -> str | None:
     return text or None
 
 
+def rakuten_variant_family_key(label: str | None) -> str | None:
+    text = clean_rakuten_variant_text(label)
+    if not text:
+        return None
+    bracketed = re.match(r"^(.*?【[^】]+】)", text)
+    if bracketed:
+        return re.sub(r"【([^】]+)】", r"\1", bracketed.group(1))
+    compact = re.match(r"^(.*?[^A-Za-z0-9])([A-Za-z0-9]{1,4})$", text)
+    if compact:
+        return f"{compact.group(1)}{compact.group(2)}"
+    return text
+
+
+def rakuten_variant_preference(label: str) -> tuple[int, int, int, str]:
+    bracketed = re.match(r"^(.*?【[^】]+】)(.*)$", label)
+    suffix = normalize_spaces(bracketed.group(2)) if bracketed else ""
+    return (
+        1 if suffix else 0,
+        1 if "【" in label and "】" in label else 0,
+        len(label),
+        label,
+    )
+
+
 def resolve_rakuten_color_aliases(labels: list[str | None]) -> dict[str, str]:
     cleaned_labels = sorted({label for label in (clean_rakuten_variant_text(item) for item in labels) if label})
     aliases: dict[str, str] = {}
+    grouped: dict[str, list[str]] = defaultdict(list)
     for label in cleaned_labels:
-        aliases[label] = label
-    for label in cleaned_labels:
-        if not re.search(r"】$", label):
-            continue
-        candidates = [candidate for candidate in cleaned_labels if candidate.startswith(label) and candidate != label]
-        if candidates:
-            aliases[label] = max(candidates, key=len)
+        grouped[rakuten_variant_family_key(label) or label].append(label)
+    for family_labels in grouped.values():
+        preferred = max(family_labels, key=rakuten_variant_preference)
+        for label in family_labels:
+            aliases[label] = preferred
     return aliases
 
 
@@ -105,6 +249,9 @@ def collapse_rakuten_variants(variants: list[dict[str, Any]]) -> list[dict[str, 
                 "units": 0.0,
                 "sessions": 0.0,
                 "conversionRate": None,
+                "timeline": [],
+                "timelineAvailable": False,
+                "timelineReason": "楽天の SKU 別売上 CSV は期間集計のため、このSKUの日別推移は出せません。",
             },
         )
         bucket["sales"] += float(variant.get("sales", 0))
@@ -135,11 +282,14 @@ def build_distribution(variants: list[dict[str, Any]], field: str) -> list[dict[
         bucket["sales"] += float(variant.get("sales", 0))
         bucket["units"] += float(variant.get("units", 0))
         bucket["orders"] += float(variant.get("orders", 0))
-    items = sorted(
-        buckets.values(),
-        key=lambda item: (item["units"], item["sales"], item["label"]),
-        reverse=True,
-    )
+    if field == "size":
+        items = sorted(buckets.values(), key=lambda item: size_sort_key(item["label"]))
+    else:
+        items = sorted(
+            buckets.values(),
+            key=lambda item: (item["units"], item["sales"], item["label"]),
+            reverse=True,
+        )
     for item in items:
         item["share"] = round_metric(safe_div(item["units"], total_units))
     return items
@@ -163,6 +313,18 @@ def summarize_product(detail: dict[str, Any]) -> dict[str, Any]:
         "hasTransactions": bool(detail.get("transactions")),
         "limitations": detail.get("limitations", []),
     }
+
+
+def variant_sort_key(variant: dict[str, Any]) -> tuple[tuple[int, int, float, str], float, float, str]:
+    size = variant.get("size") or "未設定"
+    color = normalize_spaces(str(variant.get("color") or "")) or "未設定"
+    label = normalize_spaces(str(variant.get("label") or "")) or "未設定"
+    return (
+        size_sort_key(size),
+        -float(variant.get("units", 0) or 0),
+        -float(variant.get("sales", 0) or 0),
+        f"{color} {label}",
+    )
 
 
 def source_entry(
@@ -192,7 +354,7 @@ def exact_row_signature(row: dict[str, str], keys: list[str]) -> tuple[str, ...]
     return tuple(normalize_spaces(row.get(key, "")) for key in keys)
 
 
-def build_amazon_marketplace(root: Path) -> dict[str, Any]:
+def build_amazon_marketplace(root: Path, period_start: str | None = None, period_end: str | None = None) -> dict[str, Any]:
     directory = root / "amzon-csv"
     sources: list[dict[str, Any]] = []
     notes: list[str] = []
@@ -202,9 +364,9 @@ def build_amazon_marketplace(root: Path) -> dict[str, Any]:
         lambda: {"sales": 0.0, "orders": set(), "adCost": 0.0, "fees": 0.0}
     )
     ad_cost_available = False
-    transactions_paths = list_matching_files(directory, ["取引"], [".csv"])
-    business_paths = list_matching_files(directory, ["BusinessReport"], [".csv"])
-    ads_paths = list_matching_files(directory, ["広告"], [".xlsx"])
+    transactions_paths = filter_paths_by_period(list_matching_files(directory, ["取引"], [".csv"]), period_start, period_end)
+    business_paths = filter_paths_by_period(list_matching_files(directory, ["BusinessReport"], [".csv"]), period_start, period_end)
+    ads_paths = filter_paths_by_period(list_matching_files(directory, ["広告"], [".xlsx"]), period_start, period_end)
 
     if business_paths:
         business_rows: list[dict[str, str]] = []
@@ -312,6 +474,10 @@ def build_amazon_marketplace(root: Path) -> dict[str, Any]:
                     "sessions": round(sessions, 2),
                     "conversionRate": round_metric(parse_percentage(row.get("ユニットセッション率"))),
                     "childAsin": child or None,
+                    "timeline": [],
+                    "timelineAvailable": False,
+                    "timelineReason": "Amazon の取引CSVが無いため、このSKUの日別推移は未表示です。",
+                    "_timeline": defaultdict(lambda: {"sales": 0.0, "units": 0.0}),
                 }
             )
     else:
@@ -406,6 +572,10 @@ def build_amazon_marketplace(root: Path) -> dict[str, Any]:
                 detail["_orders"].add(order_id)
                 detail["_timeline"][date]["sales"] += sales
                 detail["_timeline"][date]["orders"].add(order_id)
+                matched_variant = match_amazon_variant(detail, product_detail)
+                if matched_variant is not None:
+                    matched_variant["_timeline"][date]["sales"] += sales
+                    matched_variant["_timeline"][date]["units"] += parse_transaction_units(row)
                 detail["transactions"].append(
                     {
                         "date": date,
@@ -515,7 +685,23 @@ def build_amazon_marketplace(root: Path) -> dict[str, Any]:
         )
         detail["sizeDistribution"] = build_distribution(detail["variants"], "size")
         detail["colorDistribution"] = build_distribution(detail["variants"], "color")
-        detail["variants"].sort(key=lambda variant: (variant["sales"], variant["units"]), reverse=True)
+        detail["variants"].sort(key=variant_sort_key)
+        for variant in detail["variants"]:
+            variant["timeline"] = [
+                {
+                    "date": date,
+                    "sales": round(values["sales"], 2),
+                    "units": round(values["units"], 2),
+                }
+                for date, values in sorted(variant.get("_timeline", {}).items())
+            ]
+            if variant["timeline"]:
+                variant["timelineAvailable"] = True
+                variant["timelineReason"] = None
+            else:
+                variant["timelineAvailable"] = False
+                variant["timelineReason"] = "このSKUに紐づく Amazon 取引が見つからず、日別推移は表示していません。"
+            variant.pop("_timeline", None)
         if detail["summary"]["adCost"] is None:
             detail["limitations"].append("Amazon の広告レポートは商品別費用を含まないため、商品単位の広告費率は未算出です。")
         if not detail["timeline"]:
@@ -562,17 +748,17 @@ def build_amazon_marketplace(root: Path) -> dict[str, Any]:
     }
 
 
-def build_rakuten_marketplace(root: Path) -> dict[str, Any]:
+def build_rakuten_marketplace(root: Path, period_start: str | None = None, period_end: str | None = None) -> dict[str, Any]:
     directory = root / "rakuten-csv"
     sources: list[dict[str, Any]] = []
     notes: list[str] = []
     families: dict[str, dict[str, Any]] = {}
     timeline: dict[str, dict[str, Any]] = defaultdict(lambda: {"sales": 0.0, "orders": 0.0, "adCost": 0.0})
     ad_cost_available = False
-    sku_paths = list_matching_files(directory, ["SKU別売上"], [".csv"])
-    store_paths = list_matching_files(directory, ["店舗", "データ"], [".csv"])
-    points_paths = list_matching_files(directory, ["商品", "ポイント"], [".csv"])
-    campaign_paths = list_matching_files(directory, ["キャンペーン"], [".csv"])
+    sku_paths = filter_paths_by_period(list_matching_files(directory, ["SKU別売上"], [".csv"]), period_start, period_end)
+    store_paths = filter_paths_by_period(list_matching_files(directory, ["店舗", "データ"], [".csv"]), period_start, period_end)
+    points_paths = filter_paths_by_period(list_matching_files(directory, ["商品", "ポイント"], [".csv"]), period_start, period_end)
+    campaign_paths = filter_paths_by_period(list_matching_files(directory, ["キャンペーン"], [".csv"]), period_start, period_end)
 
     promoted_sales_by_product: dict[str, float] = defaultdict(float)
     if points_paths:
@@ -728,6 +914,9 @@ def build_rakuten_marketplace(root: Path) -> dict[str, Any]:
                     "units": round(units, 2),
                     "sessions": 0,
                     "conversionRate": None,
+                    "timeline": [],
+                    "timelineAvailable": False,
+                    "timelineReason": "楽天の SKU 別売上 CSV は期間集計のため、このSKUの日別推移は出せません。",
                 }
             )
         notes.append("楽天の商品別詳細は SKU 別売上 CSV から生成しているため、日次推移とセット購入率は今のデータでは出していません。")
@@ -862,7 +1051,7 @@ def build_rakuten_marketplace(root: Path) -> dict[str, Any]:
         detail["summary"]["units"] = round(detail["summary"]["units"], 2)
         detail["sizeDistribution"] = build_distribution(detail["variants"], "size")
         detail["colorDistribution"] = build_distribution(detail["variants"], "color")
-        detail["variants"].sort(key=lambda variant: (variant["sales"], variant["units"]), reverse=True)
+        detail["variants"].sort(key=variant_sort_key)
 
     total_sales = sum(day["sales"] for day in timeline.values())
     total_orders = sum(day["orders"] for day in timeline.values())
@@ -924,9 +1113,9 @@ def build_combined_timeline(amazon: dict[str, Any], rakuten: dict[str, Any]) -> 
     return series
 
 
-def build_dashboard(root: Path) -> dict[str, Any]:
-    amazon = build_amazon_marketplace(root)
-    rakuten = build_rakuten_marketplace(root)
+def build_dashboard(root: Path, period_start: str | None = None, period_end: str | None = None) -> dict[str, Any]:
+    amazon = build_amazon_marketplace(root, period_start, period_end)
+    rakuten = build_rakuten_marketplace(root, period_start, period_end)
     all_products = [*amazon["products"], *rakuten["products"]]
     for detail in all_products:
         detail["summary"]["adCost"] = round(detail["summary"].get("adCost", 0) or 0, 2) if detail["summary"].get("adCost") is not None else None
@@ -969,4 +1158,8 @@ def build_dashboard(root: Path) -> dict[str, Any]:
         "productDetails": product_details,
         "sources": sources,
         "notes": notes,
+        "period": {
+            "start": period_start,
+            "end": period_end,
+        },
     }
