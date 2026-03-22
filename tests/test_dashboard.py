@@ -234,6 +234,29 @@ class DashboardSmokeTest(unittest.TestCase):
             self.assertTrue(variant["timelineAvailable"])
             self.assertEqual(variant["timeline"], [{"date": "2026-03-05", "sales": 1000.0, "units": 2.0}])
 
+    def test_amazon_txt_supports_daily_tracking_while_business_report_stays_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "amzon-csv").mkdir()
+            (root / "rakuten-csv").mkdir()
+            business = """（親）ASIN,（子）ASIN,タイトル,セッション数 - 合計,注文された商品点数,ユニットセッション率,注文商品の売上額,注文品目総数\nPARENT1,CHILD1,"テスト商品 (ブラック, M)",10,2,10%,3000,3\n"""
+            order_report = """amazon-order-id\tmerchant-order-id\tpurchase-date\tlast-updated-date\torder-status\tfulfillment-channel\tsales-channel\torder-channel\turl\tship-service-level\tproduct-name\tsku\tasin\titem-status\tquantity\tcurrency\titem-price\titem-tax\tshipping-price\tshipping-tax\tgift-wrap-price\tgift-wrap-tax\titem-promotion-discount\tship-promotion-discount\tship-city\tship-state\tship-postal-code\tship-country\tpromotion-ids\n249-0000000-0000001\t\t2026-03-05T10:00:00+09:00\t2026-03-05T10:00:00+09:00\tShipped\tAmazon\tAmazon.co.jp\t\t\tStandard\t[&mellow] テスト商品 (JP, アルファベット, M, ブラック)\tSKU-1\tCHILD1\tShipped\t2\tJPY\t1000\t0\t0\t0\t0\t0\t0\t0\t東京都\t東京\t1000001\tJP\t\n"""
+            (root / "amzon-csv" / "BusinessReport-2026-03.csv").write_text(business, encoding="utf-8")
+            (root / "amzon-csv" / "orders-202603.txt").write_text(order_report, encoding="cp932")
+
+            payload = build_dashboard(root, period_start="2026-03-05", period_end="2026-03-05")
+            product = next(
+                payload["productDetails"][entry["id"]]
+                for entry in payload["products"]
+                if entry["marketplace"] == "amazon"
+            )
+            variant = product["variants"][0]
+
+            self.assertEqual(product["summary"]["sales"], 3000.0)
+            self.assertEqual(product["summary"]["units"], 3.0)
+            self.assertTrue(variant["timelineAvailable"])
+            self.assertEqual(variant["timeline"], [{"date": "2026-03-05", "sales": 1000.0, "units": 2.0}])
+
     def test_amazon_business_report_groups_renamed_titles_by_parent_asin(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
