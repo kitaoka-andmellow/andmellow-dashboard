@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ECanalytics</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="authOverlay" class="auth-overlay is-hidden">
+      <div class="auth-card">
+        <img class="auth-logo" src="/logo.png" alt="Logo" />
+        <h1 class="auth-title">ログイン</h1>
+        <p id="authMessage" class="auth-message">@andmellow.jp の Google アカウントでログインしてください。</p>
+        <div id="googleSignIn" class="google-signin"></div>
+      </div>
+    </div>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <img class="brand-logo" src="/logo.png" alt="Logo" />
+          <div id="summaryStrip" class="summary-strip"></div>
+        </div>
+        <div class="control-block">
+          <div id="authStatus" class="auth-status is-hidden">
+            <span id="authEmail" class="auth-email"></span>
+            <button id="logoutButton" class="logout-button" type="button">ログアウト</button>
+          </div>
+          <div class="period-controls">
+            <input id="periodStart" class="period-input" type="date" />
+            <span class="period-separator">-</span>
+            <input id="periodEnd" class="period-input" type="date" />
+          </div>
+          <div class="pill-group" id="marketplaceFilters">
+            <button class="filter-pill is-active" data-marketplace="all">すべて</button>
+            <button class="filter-pill" data-marketplace="amazon">Amazon</button>
+            <button class="filter-pill" data-marketplace="rakuten">楽天</button>
+          </div>
+          <input id="searchInput" class="search-input" type="search" placeholder="商品検索" />
+          <button id="refreshButton" class="refresh-button">更新</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="sidebar panel">
+          <div id="productList" class="product-list"></div>
+        </aside>
+
+        <section class="detail panel">
+          <div id="detailRoot" class="detail-root">
+            <div class="empty-state">商品を選択してください</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

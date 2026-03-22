@@ -1,0 +1,37 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ecanalytics
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "1"
+    spec:
+      containerConcurrency: 20
+      containers:
+        - image: REGION-docker.pkg.dev/PROJECT_ID/REPOSITORY/ecanalytics:latest
+          env:
+            - name: AUTH_REQUIRED
+              value: "1"
+            - name: ALLOWED_EMAIL_DOMAIN
+              value: "andmellow.jp"
+            - name: SESSION_TTL_SECONDS
+              value: "7200"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8080"
+            - name: DATA_ROOT
+              value: "/app"
+            - name: GOOGLE_CLIENT_ID
+              value: "REPLACE_WITH_GOOGLE_CLIENT_ID"
+            - name: SESSION_SECRET
+              value: "REPLACE_WITH_SECRET_OR_USE_SECRET_MANAGER"
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
