@@ -14,6 +14,7 @@ const state = {
 };
 
 const AUTO_REFRESH_MS = 60000;
+const SESSION_STORAGE_KEY = "ecanalytics_session_token";
 const MARKETPLACE_META = {
   amazon: { label: "Amazon", logo: "/amazon-logo.png" },
   rakuten: { label: "Rakuten", logo: "/rakuten-logo.png" },
@@ -309,6 +310,43 @@ function setAuthMessage(message) {
   elements.authMessage.textContent = message;
 }
 
+function getStoredSessionToken() {
+  try {
+    return window.localStorage.getItem(SESSION_STORAGE_KEY);
+  } catch (error) {
+    return null;
+  }
+}
+
+function storeSessionToken(token) {
+  try {
+    if (token) {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, token);
+    }
+  } catch (error) {
+    // no-op
+  }
+}
+
+function clearSessionToken() {
+  try {
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch (error) {
+    // no-op
+  }
+}
+
+function withSessionHeaders(headers = {}) {
+  const token = getStoredSessionToken();
+  if (!token) {
+    return headers;
+  }
+  return {
+    ...headers,
+    Authorization: `Bearer ${token}`,
+  };
+}
+
 function showAuthOverlay(message) {
   if (message) setAuthMessage(message);
   elements.authOverlay.classList.remove("is-hidden");
@@ -322,6 +360,7 @@ async function fetchJson(url, options = {}) {
   const response = await fetch(url, {
     credentials: "same-origin",
     ...options,
+    headers: withSessionHeaders(options.headers || {}),
   });
   let payload = null;
   const contentType = response.headers.get("Content-Type") || "";
@@ -362,20 +401,22 @@ function loadGoogleScript() {
 async function handleGoogleCredential(response) {
   setAuthMessage("認証中...");
   try {
-    await fetchJson("/api/auth/google", {
+    const authPayload = await fetchJson("/api/auth/google", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ credential: response.credential }),
     });
+    storeSessionToken(authPayload.sessionToken);
     const session = await fetchJson("/api/session", { cache: "no-store" });
     if (!session.authenticated) {
-      throw new Error("ログイン情報を保存できませんでした。Cookie のブロック設定を確認してください。");
+      throw new Error("ログイン情報を保存できませんでした。ブラウザの保存設定を確認してください。");
     }
     state.session = session;
     updateAuthStatus();
     hideAuthOverlay();
     await loadDashboard();
   } catch (error) {
+    clearSessionToken();
     setAuthMessage(error.message);
   }
 }
@@ -419,8 +460,9 @@ async function ensureAuthenticated(message) {
       hideAuthOverlay();
       return true;
     }
+    clearSessionToken();
   } catch (error) {
-    // no-op
+    clearSessionToken();
   }
 
   state.session = null;
@@ -739,8 +781,10 @@ async function loadDashboard() {
     const response = await fetch(buildDashboardUrl(), {
       cache: "no-store",
       credentials: "same-origin",
+      headers: withSessionHeaders(),
     });
     if (response.status === 401) {
+      clearSessionToken();
       state.session = null;
       updateAuthStatus();
       await ensureAuthenticated("セッションの有効期限が切れました。もう一度ログインしてください。");
@@ -790,6 +834,7 @@ async function logout() {
   try {
     await fetchJson("/api/logout", { method: "POST" });
   } finally {
+    clearSessionToken();
     state.session = null;
     updateAuthStatus();
     if (window.google?.accounts?.id) {

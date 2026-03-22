@@ -56,7 +56,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         cookies.load(cookie_header)
         morsel = cookies.get(SESSION_COOKIE_NAME)
         token = morsel.value if morsel else None
-        return parse_session(token)
+        session = parse_session(token)
+        if session is not None:
+            return session
+        authorization = self.headers.get("Authorization", "")
+        if authorization.startswith("Bearer "):
+            return parse_session(authorization[7:].strip())
+        return None
 
     def require_session(self):
         if not AUTH_REQUIRED:
@@ -130,6 +136,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         "authenticated": True,
                         "email": verified["email"],
                         "expiresAt": expires_at,
+                        "sessionToken": token,
                     },
                     extra_headers={
                         "Set-Cookie": session_cookie_value(token, expires_at, secure_cookies_enabled()),
