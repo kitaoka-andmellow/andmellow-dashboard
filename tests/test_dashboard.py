@@ -280,6 +280,33 @@ PARENT1,CHILD2,"テスト商品 ロングタイトル (JP, アルファベット
             self.assertEqual(sizes, ["M", "L"])
             self.assertEqual(product["summary"]["sales"], 2200.0)
 
+    def test_amazon_parent_summary_variant_is_dropped_when_child_variants_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "amzon-csv").mkdir()
+            (root / "rakuten-csv").mkdir()
+            business = """（親）ASIN,（子）ASIN,タイトル,セッション数 - 合計,注文された商品点数,ユニットセッション率,注文商品の売上額,注文品目総数
+PARENT1,PARENT1,テスト商品 親タイトル,10,2,10%,2200,2
+PARENT1,CHILD1,"テスト商品 親タイトル (JP, アルファベット, M, ブラック)",10,1,10%,1000,1
+PARENT1,CHILD2,"テスト商品 親タイトル (JP, アルファベット, L, ブラック)",10,1,10%,1200,1
+"""
+            order_report = """amazon-order-id\tmerchant-order-id\tpurchase-date\tlast-updated-date\torder-status\tfulfillment-channel\tsales-channel\torder-channel\turl\tship-service-level\tproduct-name\tsku\tasin\titem-status\tquantity\tcurrency\titem-price\titem-tax\tshipping-price\tshipping-tax\tgift-wrap-price\tgift-wrap-tax\titem-promotion-discount\tship-promotion-discount\tship-city\tship-state\tship-postal-code\tship-country\tpromotion-ids
+249-0000000-0000001\t\t2026-03-05T10:00:00+09:00\t2026-03-05T10:00:00+09:00\tShipped\tAmazon\tAmazon.co.jp\t\t\tStandard\tテスト商品\tSKU-A\tCHILD1\tShipped\t1\tJPY\t1000\t0\t0\t0\t0\t0\t0\t0\t東京都\t東京\t1000001\tJP\t
+249-0000000-0000002\t\t2026-03-06T10:00:00+09:00\t2026-03-06T10:00:00+09:00\tShipped\tAmazon\tAmazon.co.jp\t\t\tStandard\tテスト商品\tSKU-B\tCHILD2\tShipped\t1\tJPY\t1200\t0\t0\t0\t0\t0\t0\t0\t東京都\t東京\t1000001\tJP\t
+"""
+            (root / "amzon-csv" / "BusinessReport-2026-03.csv").write_text(business, encoding="utf-8")
+            (root / "amzon-csv" / "orders-202603.txt").write_text(order_report, encoding="cp932")
+
+            payload = build_dashboard(root, period_start="2026-03-01", period_end="2026-03-31")
+            product = next(
+                payload["productDetails"][entry["id"]]
+                for entry in payload["products"]
+                if entry["marketplace"] == "amazon"
+            )
+
+            labels = [variant["label"] for variant in product["variants"]]
+            self.assertEqual(labels, ["ブラック / M", "ブラック / L"])
+
 
 if __name__ == "__main__":
     unittest.main()

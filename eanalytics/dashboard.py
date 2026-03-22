@@ -280,6 +280,18 @@ def update_amazon_variant_metadata(
         )
 
 
+def should_keep_amazon_variant(variant: dict[str, Any], has_descriptive_peer: bool) -> bool:
+    if not has_descriptive_peer:
+        return True
+    has_variant_meta = bool(normalize_spaces(str(variant.get("size") or "")) or normalize_spaces(str(variant.get("color") or "")))
+    if has_variant_meta:
+        return True
+    has_sales = bool(float(variant.get("sales", 0) or 0))
+    has_units = bool(float(variant.get("units", 0) or 0))
+    has_timeline = bool(variant.get("timeline"))
+    return has_sales or has_units or has_timeline
+
+
 def clean_rakuten_variant_text(value: str | None) -> str | None:
     if not value:
         return None
@@ -1016,6 +1028,13 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 variant["timelineAvailable"] = False
                 variant["timelineReason"] = "このSKUに紐づく Amazon 取引が見つからず、日別推移は表示していません。"
             variant.pop("_timeline", None)
+        has_descriptive_peer = any(
+            normalize_spaces(str(variant.get("size") or "")) or normalize_spaces(str(variant.get("color") or ""))
+            for variant in detail["variants"]
+        )
+        detail["variants"] = [
+            variant for variant in detail["variants"] if should_keep_amazon_variant(variant, has_descriptive_peer)
+        ]
         detail["summary"]["conversionRate"] = round_metric(
             safe_div(detail["summary"]["units"], detail["summary"]["sessions"])
         )
