@@ -6,11 +6,6 @@ const state = {
   activeVariantId: null,
   authConfig: null,
   session: null,
-  availableRange: null,
-  appliedPeriodStart: null,
-  appliedPeriodEnd: null,
-  draftPeriodStart: null,
-  draftPeriodEnd: null,
 };
 
 const AUTO_REFRESH_MS = 60000;
@@ -26,9 +21,6 @@ const elements = {
   detailRoot: document.getElementById("detailRoot"),
   searchInput: document.getElementById("searchInput"),
   marketplaceFilters: document.getElementById("marketplaceFilters"),
-  periodStart: document.getElementById("periodStart"),
-  periodEnd: document.getElementById("periodEnd"),
-  applyButton: document.getElementById("applyButton"),
   variantModal: document.getElementById("variantModal"),
   variantModalBackdrop: document.getElementById("variantModalBackdrop"),
   variantModalContent: document.getElementById("variantModalContent"),
@@ -127,21 +119,11 @@ function deriveAvailableRange(data) {
 }
 
 function selectedRangeHasData() {
-  if (!state.availableRange || !state.appliedPeriodStart || !state.appliedPeriodEnd) return true;
-  return !(state.appliedPeriodEnd < state.availableRange.start || state.appliedPeriodStart > state.availableRange.end);
+  return true;
 }
 
 function buildDashboardUrl() {
-  const params = new URLSearchParams();
-  if (state.appliedPeriodStart) params.set("start", state.appliedPeriodStart);
-  if (state.appliedPeriodEnd) params.set("end", state.appliedPeriodEnd);
-  const query = params.toString();
-  return query ? `/api/dashboard?${query}` : "/api/dashboard";
-}
-
-function syncPeriodInputs() {
-  elements.periodStart.value = state.draftPeriodStart || "";
-  elements.periodEnd.value = state.draftPeriodEnd || "";
+  return "/api/dashboard";
 }
 
 function getSelectedDetail() {
@@ -172,10 +154,9 @@ function isoDateRange(start, end) {
 
 function buildVariantTimelineSeries(variant) {
   const source = new Map((variant?.timeline || []).map((item) => [item.date, item]));
-  const dates = isoDateRange(
-    state.appliedPeriodStart || variant?.timeline?.[0]?.date,
-    state.appliedPeriodEnd || variant?.timeline?.[variant.timeline.length - 1]?.date
-  );
+  const firstDate = variant?.timeline?.[0]?.date;
+  const lastDate = variant?.timeline?.[variant.timeline.length - 1]?.date;
+  const dates = isoDateRange(firstDate, lastDate);
   if (!dates.length) {
     return (variant?.timeline || []).map((item) => ({
       date: item.date,
@@ -335,11 +316,6 @@ function openVariantModal(variantId) {
       <div class="variant-modal-meta">
         <span class="variant-modal-chip">売上 ${escapeHtml(formatCurrency(variant.sales))}</span>
         <span class="variant-modal-chip">個数 ${escapeHtml(formatNumber(variant.units))}</span>
-        <span class="variant-modal-chip">${escapeHtml(
-          state.appliedPeriodStart && state.appliedPeriodEnd
-            ? `${formatDateLabel(state.appliedPeriodStart)} - ${formatDateLabel(state.appliedPeriodEnd)}`
-            : "-"
-        )}</span>
       </div>
     </header>
     ${
@@ -716,15 +692,10 @@ function renderSummary() {
   const products = getFilteredProducts();
   const totalSales = products.reduce((sum, product) => sum + product.sales, 0);
   const totalUnits = products.reduce((sum, product) => sum + product.units, 0);
-  const periodLabel =
-    state.appliedPeriodStart && state.appliedPeriodEnd
-      ? `${formatDateLabel(state.appliedPeriodStart)} - ${formatDateLabel(state.appliedPeriodEnd)}`
-      : "-";
   elements.summaryStrip.innerHTML = `
     <div class="summary-chip">商品数<strong>${formatNumber(products.length)}</strong></div>
     <div class="summary-chip">売上<strong>${formatCurrency(totalSales)}</strong></div>
     <div class="summary-chip">個数<strong>${formatNumber(totalUnits)}</strong></div>
-    <div class="summary-chip">期間<strong>${periodLabel}</strong></div>
   `;
 }
 
@@ -866,8 +837,6 @@ async function loadDashboard() {
   }
 
   closeVariantModal();
-  elements.applyButton.disabled = true;
-  elements.applyButton.textContent = "反映中";
   try {
     const response = await fetch(buildDashboardUrl(), {
       cache: "no-store",
@@ -883,31 +852,6 @@ async function loadDashboard() {
     }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     state.data = await response.json();
-    const derivedRange = deriveAvailableRange(state.data);
-    if (!state.availableRange) {
-      state.availableRange = derivedRange;
-    } else if (derivedRange) {
-      state.availableRange = {
-        start: derivedRange.start < state.availableRange.start ? derivedRange.start : state.availableRange.start,
-        end: derivedRange.end > state.availableRange.end ? derivedRange.end : state.availableRange.end,
-      };
-    }
-    if (state.availableRange) {
-      if (!state.appliedPeriodStart) state.appliedPeriodStart = state.availableRange.start;
-      if (!state.appliedPeriodEnd) state.appliedPeriodEnd = state.availableRange.end;
-      if (!state.draftPeriodStart) state.draftPeriodStart = state.appliedPeriodStart;
-      if (!state.draftPeriodEnd) state.draftPeriodEnd = state.appliedPeriodEnd;
-      elements.periodStart.disabled = false;
-      elements.periodEnd.disabled = false;
-      elements.periodStart.min = state.availableRange.start;
-      elements.periodStart.max = state.availableRange.end;
-      elements.periodEnd.min = state.availableRange.start;
-      elements.periodEnd.max = state.availableRange.end;
-      syncPeriodInputs();
-    } else {
-      elements.periodStart.disabled = true;
-      elements.periodEnd.disabled = true;
-    }
     const products = getFilteredProducts();
     if (!products.some((product) => product.id === state.selectedId)) {
       state.selectedId = products[0]?.id ?? null;
@@ -915,9 +859,6 @@ async function loadDashboard() {
     render();
   } catch (error) {
     elements.detailRoot.innerHTML = `<div class="empty-state">${error.message}</div>`;
-  } finally {
-    elements.applyButton.disabled = false;
-    elements.applyButton.textContent = "反映";
   }
 }
 
@@ -939,28 +880,6 @@ async function logout() {
 elements.searchInput.addEventListener("input", (event) => {
   state.query = event.target.value.trim();
   render();
-});
-
-elements.periodStart.addEventListener("input", (event) => {
-  state.draftPeriodStart = event.target.value || state.availableRange?.start || null;
-  if (state.draftPeriodEnd && state.draftPeriodStart && state.draftPeriodStart > state.draftPeriodEnd) {
-    state.draftPeriodEnd = state.draftPeriodStart;
-    elements.periodEnd.value = state.draftPeriodEnd;
-  }
-});
-
-elements.periodEnd.addEventListener("input", (event) => {
-  state.draftPeriodEnd = event.target.value || state.availableRange?.end || null;
-  if (state.draftPeriodStart && state.draftPeriodEnd && state.draftPeriodEnd < state.draftPeriodStart) {
-    state.draftPeriodStart = state.draftPeriodEnd;
-    elements.periodStart.value = state.draftPeriodStart;
-  }
-});
-
-elements.applyButton.addEventListener("click", () => {
-  state.appliedPeriodStart = state.draftPeriodStart || state.availableRange?.start || null;
-  state.appliedPeriodEnd = state.draftPeriodEnd || state.availableRange?.end || null;
-  loadDashboard();
 });
 
 elements.marketplaceFilters.querySelectorAll("[data-marketplace]").forEach((button) => {

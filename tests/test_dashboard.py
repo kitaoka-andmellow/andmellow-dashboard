@@ -211,15 +211,15 @@ class DashboardSmokeTest(unittest.TestCase):
             labels = [item["label"] for item in product["colorDistribution"]]
             self.assertEqual(labels, ["あか", "うすべに", "1", "2", "10"])
 
-    def test_amazon_txt_order_report_supports_daily_tracking(self) -> None:
+    def test_amazon_transaction_csv_supports_daily_tracking(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "amzon-csv").mkdir()
             (root / "rakuten-csv").mkdir()
             business = """（親）ASIN,（子）ASIN,タイトル,セッション数 - 合計,注文された商品点数,ユニットセッション率,注文商品の売上額,注文品目総数\nPARENT1,CHILD1,"テスト商品 (ブラック, M)",10,2,10%,3000,3\n"""
-            order_report = """amazon-order-id\tmerchant-order-id\tpurchase-date\tlast-updated-date\torder-status\tfulfillment-channel\tsales-channel\torder-channel\turl\tship-service-level\tproduct-name\tsku\tasin\titem-status\tquantity\tcurrency\titem-price\titem-tax\tshipping-price\tshipping-tax\tgift-wrap-price\tgift-wrap-tax\titem-promotion-discount\tship-promotion-discount\tship-city\tship-state\tship-postal-code\tship-country\tpromotion-ids\n249-0000000-0000001\t\t2026-03-05T10:00:00+09:00\t2026-03-05T10:00:00+09:00\tShipped\tAmazon\tAmazon.co.jp\t\t\tStandard\t[&mellow] テスト商品 (JP, アルファベット, M, ブラック)\tSKU-1\tCHILD1\tShipped\t2\tJPY\t1000\t0\t0\t0\t0\t0\t0\t0\t東京都\t東京\t1000001\tJP\t\n"""
+            transactions = """日付,注文番号,商品の詳細,商品価格合計,プロモーション割引合計,Amazon手数料,合計 (JPY),トランザクションの種類,トランザクションステータス,数量\n2026/03/05,ORDER-1,\"テスト商品 (ブラック, M)\",1000,0,-100,900,注文に対する支払い,完了,2\n"""
             (root / "amzon-csv" / "BusinessReport-2026-03.csv").write_text(business, encoding="utf-8")
-            (root / "amzon-csv" / "orders-202603.txt").write_text(order_report, encoding="cp932")
+            (root / "amzon-csv" / "取引-20260301_20260331.csv").write_text(transactions, encoding="utf-8")
 
             payload = build_dashboard(root, period_start="2026-03-05", period_end="2026-03-05")
             product = next(
@@ -234,16 +234,16 @@ class DashboardSmokeTest(unittest.TestCase):
             self.assertTrue(variant["timelineAvailable"])
             self.assertEqual(variant["timeline"], [{"date": "2026-03-05", "sales": 1000.0, "units": 2.0}])
 
-    def test_amazon_txt_groups_renamed_titles_by_sku_family(self) -> None:
+    def test_amazon_business_report_groups_renamed_titles_by_parent_asin(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "amzon-csv").mkdir()
             (root / "rakuten-csv").mkdir()
-            order_report = """amazon-order-id\tmerchant-order-id\tpurchase-date\tlast-updated-date\torder-status\tfulfillment-channel\tsales-channel\torder-channel\turl\tship-service-level\tproduct-name\tsku\tasin\titem-status\tquantity\tcurrency\titem-price\titem-tax\tshipping-price\tshipping-tax\tgift-wrap-price\tgift-wrap-tax\titem-promotion-discount\tship-promotion-discount\tship-city\tship-state\tship-postal-code\tship-country\tpromotion-ids
-249-0000000-0000001\t\t2026-03-05T10:00:00+09:00\t2026-03-05T10:00:00+09:00\tShipped\tAmazon\tAmazon.co.jp\t\t\tStandard\t[&mellow] 温活ショーツ 5枚セット 綿95% ハイウエスト レディース (JP, アルファベット, M, ブラック)\t30815-A-01\tASIN-1\tShipped\t1\tJPY\t1000\t0\t0\t0\t0\t0\t0\t0\t東京都\t東京\t1000001\tJP\t
-249-0000000-0000002\t\t2026-03-06T10:00:00+09:00\t2026-03-06T10:00:00+09:00\tShipped\tAmazon\tAmazon.co.jp\t\t\tStandard\t[&mellow] 温活ショーツ 5枚セット 綿ショーツ 深履き 黒 パンツ\t30815-B-01\tASIN-2\tShipped\t2\tJPY\t1500\t0\t0\t0\t0\t0\t0\t0\t東京都\t東京\t1000001\tJP\t
+            business = """（親）ASIN,（子）ASIN,タイトル,セッション数 - 合計,注文された商品点数,ユニットセッション率,注文商品の売上額,注文品目総数
+PARENT1,ASIN-1,\"[&mellow] 温活ショーツ 5枚セット 綿95% ハイウエスト レディース (JP, アルファベット, M, ブラック)\",10,1,10%,1000,1
+PARENT1,ASIN-2,\"[&mellow] 温活ショーツ 5枚セット 綿ショーツ 深履き 黒 パンツ (JP, アルファベット, L, ブラック)\",10,2,10%,1500,2
 """
-            (root / "amzon-csv" / "orders-202603.txt").write_text(order_report, encoding="cp932")
+            (root / "amzon-csv" / "BusinessReport-2026-03.csv").write_text(business, encoding="utf-8")
 
             payload = build_dashboard(root, period_start="2026-03-01", period_end="2026-03-31")
             amazon_products = [entry for entry in payload["products"] if entry["marketplace"] == "amazon"]
@@ -254,7 +254,7 @@ class DashboardSmokeTest(unittest.TestCase):
             self.assertEqual(product["summary"]["units"], 3.0)
             self.assertEqual(len(product["variants"]), 2)
 
-    def test_amazon_business_report_preserves_variant_size_for_txt_rows(self) -> None:
+    def test_amazon_business_report_preserves_variant_size_for_transaction_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "amzon-csv").mkdir()
@@ -263,12 +263,12 @@ class DashboardSmokeTest(unittest.TestCase):
 PARENT1,CHILD1,"テスト商品 ロングタイトル (JP, アルファベット, M, ブラック)",10,1,10%,1000,1
 PARENT1,CHILD2,"テスト商品 ロングタイトル (JP, アルファベット, L, ブラック)",10,1,10%,1000,1
 """
-            order_report = """amazon-order-id\tmerchant-order-id\tpurchase-date\tlast-updated-date\torder-status\tfulfillment-channel\tsales-channel\torder-channel\turl\tship-service-level\tproduct-name\tsku\tasin\titem-status\tquantity\tcurrency\titem-price\titem-tax\tshipping-price\tshipping-tax\tgift-wrap-price\tgift-wrap-tax\titem-promotion-discount\tship-promotion-discount\tship-city\tship-state\tship-postal-code\tship-country\tpromotion-ids
-249-0000000-0000001\t\t2026-03-05T10:00:00+09:00\t2026-03-05T10:00:00+09:00\tShipped\tAmazon\tAmazon.co.jp\t\t\tStandard\tテスト商品\tSKU-A\tCHILD1\tShipped\t1\tJPY\t1000\t0\t0\t0\t0\t0\t0\t0\t東京都\t東京\t1000001\tJP\t
-249-0000000-0000002\t\t2026-03-06T10:00:00+09:00\t2026-03-06T10:00:00+09:00\tShipped\tAmazon\tAmazon.co.jp\t\t\tStandard\tテスト商品\tSKU-B\tCHILD2\tShipped\t1\tJPY\t1200\t0\t0\t0\t0\t0\t0\t0\t東京都\t東京\t1000001\tJP\t
+            transactions = """日付,注文番号,商品の詳細,商品価格合計,プロモーション割引合計,Amazon手数料,合計 (JPY),トランザクションの種類,トランザクションステータス,数量
+2026/03/05,ORDER-1,テスト商品,1000,0,-100,900,注文に対する支払い,完了,1
+2026/03/06,ORDER-2,テスト商品,1200,0,-100,1100,注文に対する支払い,完了,1
 """
             (root / "amzon-csv" / "BusinessReport-2026-03.csv").write_text(business, encoding="utf-8")
-            (root / "amzon-csv" / "orders-202603.txt").write_text(order_report, encoding="cp932")
+            (root / "amzon-csv" / "取引-20260301_20260331.csv").write_text(transactions, encoding="utf-8")
 
             payload = build_dashboard(root, period_start="2026-03-01", period_end="2026-03-31")
             product = next(
@@ -291,12 +291,7 @@ PARENT1,PARENT1,テスト商品 親タイトル,10,2,10%,2200,2
 PARENT1,CHILD1,"テスト商品 親タイトル (JP, アルファベット, M, ブラック)",10,1,10%,1000,1
 PARENT1,CHILD2,"テスト商品 親タイトル (JP, アルファベット, L, ブラック)",10,1,10%,1200,1
 """
-            order_report = """amazon-order-id\tmerchant-order-id\tpurchase-date\tlast-updated-date\torder-status\tfulfillment-channel\tsales-channel\torder-channel\turl\tship-service-level\tproduct-name\tsku\tasin\titem-status\tquantity\tcurrency\titem-price\titem-tax\tshipping-price\tshipping-tax\tgift-wrap-price\tgift-wrap-tax\titem-promotion-discount\tship-promotion-discount\tship-city\tship-state\tship-postal-code\tship-country\tpromotion-ids
-249-0000000-0000001\t\t2026-03-05T10:00:00+09:00\t2026-03-05T10:00:00+09:00\tShipped\tAmazon\tAmazon.co.jp\t\t\tStandard\tテスト商品\tSKU-A\tCHILD1\tShipped\t1\tJPY\t1000\t0\t0\t0\t0\t0\t0\t0\t東京都\t東京\t1000001\tJP\t
-249-0000000-0000002\t\t2026-03-06T10:00:00+09:00\t2026-03-06T10:00:00+09:00\tShipped\tAmazon\tAmazon.co.jp\t\t\tStandard\tテスト商品\tSKU-B\tCHILD2\tShipped\t1\tJPY\t1200\t0\t0\t0\t0\t0\t0\t0\t東京都\t東京\t1000001\tJP\t
-"""
             (root / "amzon-csv" / "BusinessReport-2026-03.csv").write_text(business, encoding="utf-8")
-            (root / "amzon-csv" / "orders-202603.txt").write_text(order_report, encoding="cp932")
 
             payload = build_dashboard(root, period_start="2026-03-01", period_end="2026-03-31")
             product = next(

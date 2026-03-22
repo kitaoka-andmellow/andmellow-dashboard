@@ -486,11 +486,9 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
     ad_cost_available = False
     transactions_paths = filter_paths_by_period(list_matching_files(directory, ["取引"], [".csv"]), period_start, period_end)
     business_paths = filter_paths_by_period(list_matching_files(directory, ["BusinessReport"], [".csv"]), period_start, period_end)
-    order_report_paths = filter_paths_by_period(list_matching_files(directory, [], [".txt"]), period_start, period_end)
+    order_report_paths: list[Path] = []
     ads_paths = filter_paths_by_period(list_matching_files(directory, ["広告"], [".xlsx"]), period_start, period_end)
-    has_order_reports = bool(order_report_paths)
-    if has_order_reports:
-        transactions_paths = []
+    has_order_reports = False
 
     if business_paths:
         business_rows: list[dict[str, str]] = []
@@ -607,11 +605,7 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                     "_hasBusinessSnapshot": True,
                     "timeline": [],
                     "timelineAvailable": False,
-                    "timelineReason": (
-                        "Amazon の注文レポートから日別推移を生成します。"
-                        if has_order_reports
-                        else "Amazon の取引CSVが無いため、このSKUの日別推移は未表示です。"
-                    ),
+                    "timelineReason": "Amazon の取引CSVが無いため、このSKUの日別推移は未表示です。",
                     "_timeline": defaultdict(lambda: {"sales": 0.0, "units": 0.0}),
                 }
             )
@@ -742,103 +736,24 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             "_hasBusinessSnapshot": False,
             "timeline": [],
             "timelineAvailable": False,
-            "timelineReason": "Amazon の注文レポートから日別推移を生成します。",
+            "timelineReason": "Amazon の取引CSVが無いため、このSKUの日別推移は未表示です。",
             "_timeline": defaultdict(lambda: {"sales": 0.0, "units": 0.0}),
         }
         detail["variants"].append(variant)
         return variant
 
     order_line_counts: dict[str, int] = defaultdict(int)
-    if order_report_paths:
-        order_report_rows: list[dict[str, str]] = []
-        seen_order_report_rows: set[tuple[str, ...]] = set()
-        order_report_duplicates_removed = 0
-        for order_report_path in order_report_paths:
-            rows = read_delimited_rows(order_report_path, delimiter="\t")
-            if rows and "amazon-order-id" not in rows[0]:
-                continue
-            for row in rows:
-                signature = exact_row_signature(
-                    row,
-                    [
-                        "amazon-order-id",
-                        "purchase-date",
-                        "sku",
-                        "asin",
-                        "quantity",
-                        "item-price",
-                        "item-promotion-discount",
-                    ],
-                )
-                if signature in seen_order_report_rows:
-                    order_report_duplicates_removed += 1
-                    continue
-                seen_order_report_rows.add(signature)
-                order_report_rows.append(row)
-        sources.append(
-            source_entry(
-                "amazon_order_report",
-                "Amazon 注文レポートTXT",
-                order_report_paths[0],
-                "loaded" if order_report_rows else "empty",
-                len(order_report_rows),
-                f"{len(order_report_paths)}ファイルの注文レポートTXTを読み込みました。"
-                if order_report_rows
-                else "注文レポートTXTに行がありません。",
-                paths=order_report_paths,
-                duplicates_removed=order_report_duplicates_removed,
-            )
+    sources.append(
+        source_entry(
+            "amazon_order_report",
+            "Amazon 注文レポートTXT",
+            None,
+            "ignored",
+            0,
+            "Amazon 集計は CSV のみを使用するため、TXT は読み込みません。",
+            paths=[],
         )
-        for row in order_report_rows:
-            status = normalize_spaces(row.get("order-status", ""))
-            item_status = normalize_spaces(row.get("item-status", ""))
-            if status.lower() == "cancelled" or item_status.lower() == "cancelled":
-                continue
-            date = parse_date(row.get("purchase-date"))
-            order_id = normalize_spaces(row.get("amazon-order-id", ""))
-            asin = normalize_spaces(row.get("asin", ""))
-            sku = normalize_spaces(row.get("sku", ""))
-            product_title = normalize_spaces(row.get("product-name", ""))
-            units = parse_number(row.get("quantity"))
-            if not date_in_period(date, period_start, period_end) or not order_id or not units:
-                continue
-            item_price = parse_number(row.get("item-price"))
-            item_discount = parse_number(row.get("item-promotion-discount"))
-            sales = max(0.0, item_price - item_discount if item_discount >= 0 else item_price + item_discount)
-            family_key = asin_index.get(asin)
-            if not family_key:
-                sku_family = amazon_sku_family(sku)
-                if sku_family:
-                    family_key = sku_family_index.get(sku_family)
-            if not family_key:
-                family_key = match_family(product_title)
-            if family_key and family_key in families:
-                detail = families[family_key]
-            else:
-                family_key, detail = ensure_amazon_detail(product_title, asin or None, sku or None)
-            variant = ensure_amazon_variant(detail, product_title, asin or None, sku or None)
-            sku_family = amazon_sku_family(sku)
-            if sku_family:
-                sku_family_index[sku_family] = family_key
-            detail["_orders"].add(order_id)
-            detail["_timeline"][date]["sales"] += sales
-            detail["_timeline"][date]["orders"].add(order_id)
-            detail["_timeline"][date]["units"] += units
-            variant["_timeline"][date]["sales"] += sales
-            variant["_timeline"][date]["units"] += units
-            order_line_counts[order_id] += 1
-    else:
-        sources.append(
-            source_entry(
-                "amazon_order_report",
-                "Amazon 注文レポートTXT",
-                None,
-                "missing",
-                0,
-                "注文レポートTXTが見つかりませんでした。",
-                paths=[],
-            )
-        )
+    )
 
     if transactions_paths:
         transaction_rows: list[dict[str, str]] = []
@@ -894,21 +809,19 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
             units = parse_transaction_units(row)
             family_key = match_family(product_detail)
             timeline[date]["fees"] += fee
-            if not order_report_paths:
-                timeline[date]["sales"] += sales
-                timeline[date]["orders"].add(order_id)
-                order_line_counts[order_id] += 1
+            timeline[date]["sales"] += sales
+            timeline[date]["orders"].add(order_id)
+            order_line_counts[order_id] += 1
             if family_key and family_key in families:
                 detail = families[family_key]
-                if not order_report_paths:
-                    detail["_orders"].add(order_id)
-                    detail["_timeline"][date]["sales"] += sales
-                    detail["_timeline"][date]["orders"].add(order_id)
-                    detail["_timeline"][date]["units"] += units
-                    matched_variant = match_amazon_variant(detail, product_detail)
-                    if matched_variant is not None:
-                        matched_variant["_timeline"][date]["sales"] += sales
-                        matched_variant["_timeline"][date]["units"] += units
+                detail["_orders"].add(order_id)
+                detail["_timeline"][date]["sales"] += sales
+                detail["_timeline"][date]["orders"].add(order_id)
+                detail["_timeline"][date]["units"] += units
+                matched_variant = match_amazon_variant(detail, product_detail)
+                if matched_variant is not None:
+                    matched_variant["_timeline"][date]["sales"] += sales
+                    matched_variant["_timeline"][date]["units"] += units
                 detail["transactions"].append(
                     {
                         "date": date,
@@ -928,16 +841,13 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 "amazon_transactions",
                 "Amazon 取引CSV",
                 None,
-                "ignored" if has_order_reports else "missing",
+                "missing",
                 0,
-                "注文レポートTXTを優先するため、取引CSVは使っていません。"
-                if has_order_reports
-                else "取引CSVが見つかりませんでした。",
+                "取引CSVが見つかりませんでした。",
                 paths=[],
             )
         )
-        if not order_report_paths:
-            notes.append("Amazon の取引CSVが無いため、商品ごとのトランザクションとセット購入率は表示できません。")
+        notes.append("Amazon の取引CSVが無いため、商品ごとのトランザクションと日別推移は表示できません。")
 
     if ads_paths:
         records = 0
