@@ -409,6 +409,10 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
     business_paths = filter_paths_by_period(list_matching_files(directory, ["BusinessReport"], [".csv"]), period_start, period_end)
     order_report_paths = filter_paths_by_period(list_matching_files(directory, [], [".txt"]), period_start, period_end)
     ads_paths = filter_paths_by_period(list_matching_files(directory, ["広告"], [".xlsx"]), period_start, period_end)
+    use_order_reports_only = bool(order_report_paths)
+    if use_order_reports_only:
+        transactions_paths = []
+        business_paths = []
 
     if business_paths:
         business_rows: list[dict[str, str]] = []
@@ -528,9 +532,11 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 "amazon_business",
                 "Amazon 商品別レポート",
                 None,
-                "missing",
+                "ignored" if use_order_reports_only else "missing",
                 0,
-                "BusinessReport CSV が見つかりませんでした。",
+                "注文レポートTXTを優先するため、BusinessReport CSV は使っていません。"
+                if use_order_reports_only
+                else "BusinessReport CSV が見つかりませんでした。",
                 paths=[],
             )
         )
@@ -800,9 +806,11 @@ def build_amazon_marketplace(root: Path, period_start: str | None = None, period
                 "amazon_transactions",
                 "Amazon 取引CSV",
                 None,
-                "missing",
+                "ignored" if use_order_reports_only else "missing",
                 0,
-                "取引CSVが見つかりませんでした。",
+                "注文レポートTXTを優先するため、取引CSVは使っていません。"
+                if use_order_reports_only
+                else "取引CSVが見つかりませんでした。",
                 paths=[],
             )
         )

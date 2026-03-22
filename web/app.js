@@ -103,14 +103,23 @@ function extractDateRangeFromPath(path) {
 }
 
 function deriveAvailableRange(data) {
-  if (!data?.sources?.length) return null;
-  const ranges = data.sources
+  const sourceRanges = (data?.sources || [])
     .flatMap((source) => (source.paths?.length ? source.paths : source.path ? [source.path] : []))
     .map((path) => extractDateRangeFromPath(path))
     .filter(Boolean);
-  if (!ranges.length) return null;
-  const starts = ranges.map((range) => range.start).sort();
-  const ends = ranges.map((range) => range.end).sort();
+  const timelineDates = (data?.timeline || []).map((item) => item.date).filter(Boolean);
+  const starts = [
+    ...sourceRanges.map((range) => range.start),
+    ...(timelineDates.length ? [timelineDates.slice().sort()[0]] : []),
+  ].sort();
+  const sortedTimelineDates = timelineDates.slice().sort();
+  const ends = [
+    ...sourceRanges.map((range) => range.end),
+    ...(sortedTimelineDates.length ? [sortedTimelineDates[sortedTimelineDates.length - 1]] : []),
+  ]
+    .filter(Boolean)
+    .sort();
+  if (!starts.length || !ends.length) return null;
   return {
     start: starts[0],
     end: ends[ends.length - 1],
