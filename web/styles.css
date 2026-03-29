@@ -234,9 +234,12 @@ body {
   min-width: 4.2rem;
 }
 
-.apply-button:disabled {
+.apply-button.is-loading {
   opacity: 0.62;
-  cursor: wait;
+}
+
+.apply-button[aria-busy="true"] {
+  cursor: progress;
 }
 
 .period-input:disabled {

@@ -41,6 +41,8 @@ const elements = {
 };
 
 let googleScriptPromise = null;
+let dashboardAbortController = null;
+let dashboardRequestId = 0;
 
 function formatCurrency(value) {
   if (value == null) return "-";
@@ -149,6 +151,12 @@ function buildDashboardUrl() {
 function syncPeriodInputs() {
   elements.periodStart.value = state.draftPeriodStart || "";
   elements.periodEnd.value = state.draftPeriodEnd || "";
+}
+
+function setApplyButtonLoading(isLoading) {
+  elements.applyButton.classList.toggle("is-loading", isLoading);
+  elements.applyButton.setAttribute("aria-busy", isLoading ? "true" : "false");
+  elements.applyButton.textContent = isLoading ? "反映中" : "反映";
 }
 
 function getSelectedDetail() {
@@ -871,14 +879,17 @@ async function loadDashboard() {
     return;
   }
 
+  dashboardAbortController?.abort();
+  dashboardAbortController = new AbortController();
+  const requestId = ++dashboardRequestId;
   closeVariantModal();
-  elements.applyButton.disabled = true;
-  elements.applyButton.textContent = "反映中";
+  setApplyButtonLoading(true);
   try {
     const response = await fetch(buildDashboardUrl(), {
       cache: "no-store",
       credentials: "same-origin",
       headers: withSessionHeaders(),
+      signal: dashboardAbortController.signal,
     });
     if (response.status === 401) {
       clearSessionToken();
@@ -899,16 +910,24 @@ async function loadDashboard() {
       state.draftPeriodEnd = fallbackRange.end;
       syncPeriodInputs();
     }
+    if (requestId !== dashboardRequestId) {
+      return;
+    }
     const products = getFilteredProducts();
     if (!products.some((product) => product.id === state.selectedId)) {
       state.selectedId = products[0]?.id ?? null;
     }
     render();
   } catch (error) {
+    if (error.name === "AbortError") {
+      return;
+    }
     elements.detailRoot.innerHTML = `<div class="empty-state">${error.message}</div>`;
   } finally {
-    elements.applyButton.disabled = false;
-    elements.applyButton.textContent = "反映";
+    if (requestId === dashboardRequestId) {
+      setApplyButtonLoading(false);
+      dashboardAbortController = null;
+    }
   }
 }
 
@@ -932,26 +951,57 @@ elements.searchInput.addEventListener("input", (event) => {
   render();
 });
 
-elements.periodStart.addEventListener("input", (event) => {
-  state.draftPeriodStart = event.target.value || null;
+function handlePeriodStartUpdate(value) {
+  state.draftPeriodStart = value || null;
   if (state.draftPeriodStart && state.draftPeriodEnd && state.draftPeriodStart > state.draftPeriodEnd) {
     state.draftPeriodEnd = state.draftPeriodStart;
     elements.periodEnd.value = state.draftPeriodEnd;
   }
-});
+}
 
-elements.periodEnd.addEventListener("input", (event) => {
-  state.draftPeriodEnd = event.target.value || null;
+function handlePeriodEndUpdate(value) {
+  state.draftPeriodEnd = value || null;
   if (state.draftPeriodStart && state.draftPeriodEnd && state.draftPeriodEnd < state.draftPeriodStart) {
     state.draftPeriodStart = state.draftPeriodEnd;
     elements.periodStart.value = state.draftPeriodStart;
   }
+}
+
+elements.periodStart.addEventListener("input", (event) => {
+  handlePeriodStartUpdate(event.target.value);
+});
+
+elements.periodStart.addEventListener("change", (event) => {
+  handlePeriodStartUpdate(event.target.value);
+});
+
+elements.periodEnd.addEventListener("input", (event) => {
+  handlePeriodEndUpdate(event.target.value);
+});
+
+elements.periodEnd.addEventListener("change", (event) => {
+  handlePeriodEndUpdate(event.target.value);
 });
 
 elements.applyButton.addEventListener("click", () => {
+  handlePeriodStartUpdate(elements.periodStart.value);
+  handlePeriodEndUpdate(elements.periodEnd.value);
   state.appliedPeriodStart = state.draftPeriodStart || null;
   state.appliedPeriodEnd = state.draftPeriodEnd || null;
+  renderSummary();
   loadDashboard();
+});
+
+[elements.periodStart, elements.periodEnd].forEach((input) => {
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    state.appliedPeriodStart = state.draftPeriodStart || null;
+    state.appliedPeriodEnd = state.draftPeriodEnd || null;
+    loadDashboard();
+  });
 });
 
 elements.marketplaceFilters.querySelectorAll("[data-marketplace]").forEach((button) => {
