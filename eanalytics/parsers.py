@@ -102,8 +102,7 @@ def list_matching_files(directory: Path, keywords: Iterable[str], suffixes: Iter
 
 
 def read_csv_rows(path: Path, header_index: int = 0) -> list[dict[str, str]]:
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.reader(handle))
+    rows = _read_csv_table(path)
     if header_index >= len(rows):
         return []
     headers = [normalize_spaces(column) for column in rows[header_index]]
@@ -152,8 +151,7 @@ def read_delimited_rows(
 
 
 def read_csv_rows_matching(path: Path, header_match: Callable[[list[str]], bool]) -> list[dict[str, str]]:
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.reader(handle))
+    rows = _read_csv_table(path)
     for index, row in enumerate(rows):
         normalized = [normalize_spaces(cell) for cell in row]
         if header_match(normalized):
@@ -167,6 +165,19 @@ def read_csv_rows_matching(path: Path, header_match: Callable[[list[str]], bool]
                     record[header] = data_row[header_index].strip() if header_index < len(data_row) else ""
                 records.append(record)
             return records
+    return []
+
+
+def _read_csv_table(path: Path, encodings: tuple[str, ...] = ("utf-8-sig", "cp932", "shift_jis", "utf-8")) -> list[list[str]]:
+    last_error: Exception | None = None
+    for encoding in encodings:
+        try:
+            with path.open(encoding=encoding, newline="") as handle:
+                return list(csv.reader(handle))
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
     return []
 
 
