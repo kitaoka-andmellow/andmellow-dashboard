@@ -20,6 +20,7 @@ from .parsers import (
     read_xlsx_rows,
     slugify,
 )
+from .rakuten_api import fetch_rakuten_orders, rakuten_api_enabled
 
 
 def safe_div(numerator: float, denominator: float) -> float | None:
@@ -368,23 +369,97 @@ def collapse_rakuten_variants(variants: list[dict[str, Any]]) -> list[dict[str, 
                 "conversionRate": None,
                 "timeline": [],
                 "timelineAvailable": False,
-                "timelineReason": "楽天の SKU 別売上 CSV は期間集計のため、このSKUの日別推移は出せません。",
+                "timelineReason": variant.get("timelineReason")
+                or "楽天の SKU 別売上 CSV は期間集計のため、このSKUの日別推移は出せません。",
+                "_timeline": defaultdict(lambda: {"sales": 0.0, "units": 0.0}),
             },
         )
         bucket["sales"] += float(variant.get("sales", 0))
         bucket["orders"] += float(variant.get("orders", 0))
         bucket["units"] += float(variant.get("units", 0))
         bucket["sessions"] += float(variant.get("sessions", 0))
+        for point in variant.get("timeline", []):
+            date = normalize_spaces(point.get("date", ""))
+            if not date:
+                continue
+            bucket["_timeline"][date]["sales"] += float(point.get("sales", 0))
+            bucket["_timeline"][date]["units"] += float(point.get("units", 0))
+        if variant.get("timelineAvailable"):
+            bucket["timelineAvailable"] = True
+            bucket["timelineReason"] = None
     return [
         {
-            **variant,
+            **{key: value for key, value in variant.items() if key != "_timeline"},
             "sales": round(variant["sales"], 2),
             "orders": round(variant["orders"], 2),
             "units": round(variant["units"], 2),
             "sessions": round(variant["sessions"], 2),
+            "timeline": [
+                {
+                    "date": date,
+                    "sales": round(values["sales"], 2),
+                    "units": round(values["units"], 2),
+                }
+                for date, values in sorted(variant.get("_timeline", {}).items())
+            ],
         }
         for variant in collapsed.values()
     ]
+
+
+def looks_like_size(label: str | None) -> bool:
+    text = normalize_spaces(str(label or ""))
+    if not text:
+        return False
+    group, rank, _, _ = size_sort_key(text)
+    return group in {0, 1}
+
+
+def parse_rakuten_variant_segments(*values: str | None) -> tuple[str | None, str | None]:
+    segments: list[str] = []
+    for value in values:
+        text = normalize_spaces(str(value or ""))
+        if not text:
+            continue
+        normalized = (
+            text.replace("<br />", "\n")
+            .replace("<br/>", "\n")
+            .replace("<br>", "\n")
+            .replace("／", "/")
+            .replace("｜", "|")
+        )
+        for segment in re.split(r"[\n|]+", normalized):
+            cleaned = normalize_spaces(segment)
+            if cleaned:
+                segments.append(cleaned)
+
+    color = None
+    size = None
+    unlabeled: list[str] = []
+    for segment in segments:
+        if ":" in segment or "：" in segment:
+            key, value = re.split(r"[:：]", segment, maxsplit=1)
+            key_text = normalize_product_text(key)
+            option = normalize_spaces(value)
+            if not option:
+                continue
+            if "サイズ" in key or key_text in {"size", "siz"}:
+                size = option
+            elif "カラー" in key or "色" in key or key_text in {"color", "colour"}:
+                color = clean_rakuten_variant_text(option) or option
+            else:
+                unlabeled.append(option)
+        else:
+            unlabeled.append(segment)
+
+    for segment in unlabeled:
+        if not size and looks_like_size(segment):
+            size = segment
+            continue
+        if not color:
+            color = clean_rakuten_variant_text(segment) or segment
+
+    return color, size
 
 
 def build_distribution(variants: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
@@ -1121,6 +1196,250 @@ def build_rakuten_marketplace(root: Path, period_start: str | None = None, perio
     families: dict[str, dict[str, Any]] = {}
     timeline: dict[str, dict[str, Any]] = defaultdict(lambda: {"sales": 0.0, "orders": 0.0, "adCost": 0.0})
     ad_cost_available = False
+
+    if rakuten_api_enabled() and period_start and period_end:
+        try:
+            orders = fetch_rakuten_orders(period_start, period_end)
+        except Exception as exc:
+            sources.append(
+                source_entry(
+                    "rakuten_orders_api",
+                    "楽天 受注API",
+                    None,
+                    "error",
+                    0,
+                    str(exc),
+                    paths=[],
+                )
+            )
+            return {
+                "marketplace": "rakuten",
+                "summary": {
+                    "sales": 0.0,
+                    "orders": 0.0,
+                    "units": 0.0,
+                    "fees": 0.0,
+                    "adCost": None,
+                    "adRatio": None,
+                    "bundleRate": None,
+                    "averageOrderValue": None,
+                },
+                "timeline": {},
+                "products": [],
+                "notes": [f"楽天APIの取得に失敗しました: {exc}"],
+                "sources": sources,
+            }
+
+        sources.append(
+            source_entry(
+                "rakuten_orders_api",
+                "楽天 受注API",
+                None,
+                "loaded" if orders else "empty",
+                len(orders),
+                "楽天受注APIから注文データを取得しました。" if orders else "楽天受注APIで対象注文が見つかりませんでした。",
+                paths=[],
+            )
+        )
+
+        all_order_ids: set[str] = set()
+        order_line_counts: dict[str, int] = defaultdict(int)
+        for order in orders:
+            order_id = normalize_spaces(order.get("orderNumber", ""))
+            order_date = parse_date(order.get("orderDatetime"))
+            if not order_id or not date_in_period(order_date, period_start, period_end):
+                continue
+            all_order_ids.add(order_id)
+            packages = order.get("PackageModelList") or []
+            for package in packages:
+                items = package.get("ItemModelList") or []
+                for item in items:
+                    if str(item.get("deleteItemFlag", "0")) == "1":
+                        continue
+                    name = normalize_spaces(item.get("itemName", "")) or "楽天商品"
+                    product_code = normalize_spaces(item.get("manageNumber", "")) or slugify(name)
+                    family_key = product_code or normalize_product_text(name)
+                    detail = families.setdefault(
+                        family_key,
+                        {
+                            "id": f"rakuten-{product_code}",
+                            "marketplace": "rakuten",
+                            "name": name,
+                            "summary": {
+                                "sales": 0.0,
+                                "orders": 0.0,
+                                "units": 0.0,
+                                "sessions": 0.0,
+                                "conversionRate": None,
+                                "adCost": None,
+                                "adRatio": None,
+                                "bundleRate": None,
+                                "variantCount": 0,
+                                "promotedSales": 0.0,
+                            },
+                            "sizeDistribution": [],
+                            "colorDistribution": [],
+                            "variants": [],
+                            "timeline": [],
+                            "transactions": [],
+                            "limitations": [],
+                            "_orders": set(),
+                            "_timeline": defaultdict(lambda: {"sales": 0.0, "orders": set(), "units": 0.0}),
+                        },
+                    )
+                    if len(name) < len(detail["name"]):
+                        detail["name"] = name
+                    color, size = parse_rakuten_variant_segments(
+                        item.get("skuInfo"),
+                        item.get("selectedChoice"),
+                    )
+                    units = parse_number(item.get("units"))
+                    unit_price = parse_number(item.get("price"))
+                    sales = round(unit_price * units, 2)
+                    variant_id_seed = normalize_spaces(item.get("merchantDefinedSkuId", "")) or normalize_spaces(
+                        item.get("inventoryType", "")
+                    )
+                    variant_title = " / ".join(
+                        part for part in (color, size, normalize_spaces(item.get("skuInfo", ""))) if part
+                    ) or name
+                    variant = next(
+                        (
+                            candidate
+                            for candidate in detail["variants"]
+                            if candidate.get("id") == (variant_id_seed or None)
+                            and variant_id_seed
+                        ),
+                        None,
+                    )
+                    if variant is None:
+                        variant = next(
+                            (
+                                candidate
+                                for candidate in detail["variants"]
+                                if (candidate.get("color") or "未設定") == (color or "未設定")
+                                and (candidate.get("size") or "未設定") == (size or "未設定")
+                            ),
+                            None,
+                        )
+                    if variant is None:
+                        variant = {
+                            "id": variant_id_seed or f"{detail['id']}-variant-{len(detail['variants']) + 1}",
+                            "title": variant_title,
+                            "label": " / ".join(part for part in (color, size) if part) or "未設定",
+                            "size": size,
+                            "color": color,
+                            "sales": 0.0,
+                            "orders": 0.0,
+                            "units": 0.0,
+                            "sessions": 0.0,
+                            "conversionRate": None,
+                            "timeline": [],
+                            "timelineAvailable": False,
+                            "timelineReason": "楽天受注APIから日別推移を生成します。",
+                            "_timeline": defaultdict(lambda: {"sales": 0.0, "units": 0.0}),
+                        }
+                        detail["variants"].append(variant)
+
+                    detail["summary"]["sales"] += sales
+                    detail["summary"]["units"] += units
+                    detail["_orders"].add(order_id)
+                    detail["_timeline"][order_date]["sales"] += sales
+                    detail["_timeline"][order_date]["orders"].add(order_id)
+                    detail["_timeline"][order_date]["units"] += units
+                    variant["sales"] += sales
+                    variant["units"] += units
+                    variant["_timeline"][order_date]["sales"] += sales
+                    variant["_timeline"][order_date]["units"] += units
+                    timeline[order_date]["sales"] += sales
+                    timeline[order_date]["orders"] += 0.0
+                    order_line_counts[order_id] += 1
+                    detail["transactions"].append(
+                        {
+                            "date": order_date,
+                            "orderId": order_id,
+                            "status": normalize_spaces(order.get("orderProgress", "")),
+                            "detail": variant["label"],
+                            "grossSales": round(sales, 2),
+                            "promotionDiscount": 0.0,
+                            "sales": round(sales, 2),
+                            "fee": 0.0,
+                            "settlement": round(sales, 2),
+                        }
+                    )
+
+        daily_order_sets: dict[str, set[str]] = defaultdict(set)
+        for detail in families.values():
+            for entry in detail["transactions"]:
+                daily_order_sets[entry["date"]].add(entry["orderId"])
+        for day, values in timeline.items():
+            values["orders"] = float(len(daily_order_sets.get(day, set())))
+
+        multi_item_orders = {order_id for order_id, count in order_line_counts.items() if count > 1}
+        for detail in families.values():
+            detail["transactions"].sort(key=lambda item: (item["date"], item["orderId"]), reverse=True)
+            detail["transactions"] = detail["transactions"][:40]
+            detail["summary"]["orders"] = float(len(detail["_orders"]))
+            detail["summary"]["bundleRate"] = round_metric(safe_div(len(detail["_orders"] & multi_item_orders), len(detail["_orders"])))
+            detail["summary"]["variantCount"] = len(detail["variants"])
+            detail["summary"]["sales"] = round(detail["summary"]["sales"], 2)
+            detail["summary"]["units"] = round(detail["summary"]["units"], 2)
+            detail["timeline"] = [
+                {
+                    "date": day,
+                    "sales": round(values["sales"], 2),
+                    "orders": len(values["orders"]),
+                }
+                for day, values in sorted(detail["_timeline"].items())
+            ]
+            for variant in detail["variants"]:
+                variant["sales"] = round(variant["sales"], 2)
+                variant["units"] = round(variant["units"], 2)
+                variant["timeline"] = [
+                    {
+                        "date": day,
+                        "sales": round(values["sales"], 2),
+                        "units": round(values["units"], 2),
+                    }
+                    for day, values in sorted(variant["_timeline"].items())
+                ]
+                variant["timelineAvailable"] = bool(variant["timeline"])
+                variant["timelineReason"] = None if variant["timeline"] else "このSKUの日別データはありません。"
+                variant.pop("_timeline", None)
+            detail["variants"] = collapse_rakuten_variants(detail["variants"])
+            detail["sizeDistribution"] = build_distribution(detail["variants"], "size")
+            detail["colorDistribution"] = build_distribution(detail["variants"], "color")
+            detail["variants"].sort(key=variant_sort_key)
+            detail.pop("_orders", None)
+            detail.pop("_timeline", None)
+
+        total_sales = sum(day["sales"] for day in timeline.values())
+        total_orders = float(len(all_order_ids))
+        total_units = sum(detail["summary"]["units"] for detail in families.values())
+        return {
+            "marketplace": "rakuten",
+            "summary": {
+                "sales": round(total_sales, 2),
+                "orders": round(total_orders, 2),
+                "units": round(total_units, 2),
+                "fees": 0.0,
+                "adCost": None,
+                "adRatio": None,
+                "bundleRate": round_metric(safe_div(len(multi_item_orders), total_orders)),
+                "averageOrderValue": round_metric(safe_div(total_sales, total_orders)),
+            },
+            "timeline": {
+                day: {
+                    "sales": round(values["sales"], 2),
+                    "orders": round(values["orders"], 2),
+                    "adCost": 0.0,
+                }
+                for day, values in timeline.items()
+            },
+            "products": list(families.values()),
+            "notes": notes,
+            "sources": sources,
+        }
+
     sku_paths = filter_paths_by_period(list_matching_files(directory, ["SKU別売上"], [".csv"]), period_start, period_end)
     store_paths = filter_paths_by_period(list_matching_files(directory, ["店舗", "データ"], [".csv"]), period_start, period_end)
     points_paths = filter_paths_by_period(list_matching_files(directory, ["商品", "ポイント"], [".csv"]), period_start, period_end)

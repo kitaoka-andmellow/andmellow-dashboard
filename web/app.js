@@ -6,6 +6,10 @@ const state = {
   activeVariantId: null,
   authConfig: null,
   session: null,
+  appliedPeriodStart: null,
+  appliedPeriodEnd: null,
+  draftPeriodStart: null,
+  draftPeriodEnd: null,
 };
 
 const AUTO_REFRESH_MS = 60000;
@@ -21,6 +25,9 @@ const elements = {
   detailRoot: document.getElementById("detailRoot"),
   searchInput: document.getElementById("searchInput"),
   marketplaceFilters: document.getElementById("marketplaceFilters"),
+  periodStart: document.getElementById("periodStart"),
+  periodEnd: document.getElementById("periodEnd"),
+  applyButton: document.getElementById("applyButton"),
   variantModal: document.getElementById("variantModal"),
   variantModalBackdrop: document.getElementById("variantModalBackdrop"),
   variantModalContent: document.getElementById("variantModalContent"),
@@ -75,6 +82,15 @@ function isoFromDate(date) {
   return toIsoDate(date.getFullYear(), date.getMonth() + 1, date.getDate());
 }
 
+function defaultPeriodRange(days = 30) {
+  const end = new Date();
+  const start = new Date(end.getTime() - (days - 1) * 24 * 60 * 60 * 1000);
+  return {
+    start: isoFromDate(start),
+    end: isoFromDate(end),
+  };
+}
+
 function extractDateRangeFromPath(path) {
   if (!path) return null;
   const compact = path.match(/(20\d{2})(\d{2})(\d{2})_(20\d{2})(\d{2})(\d{2})/);
@@ -123,7 +139,16 @@ function selectedRangeHasData() {
 }
 
 function buildDashboardUrl() {
-  return "/api/dashboard";
+  const params = new URLSearchParams();
+  if (state.appliedPeriodStart) params.set("start", state.appliedPeriodStart);
+  if (state.appliedPeriodEnd) params.set("end", state.appliedPeriodEnd);
+  const query = params.toString();
+  return query ? `/api/dashboard?${query}` : "/api/dashboard";
+}
+
+function syncPeriodInputs() {
+  elements.periodStart.value = state.draftPeriodStart || "";
+  elements.periodEnd.value = state.draftPeriodEnd || "";
 }
 
 function getSelectedDetail() {
@@ -154,8 +179,8 @@ function isoDateRange(start, end) {
 
 function buildVariantTimelineSeries(variant) {
   const source = new Map((variant?.timeline || []).map((item) => [item.date, item]));
-  const firstDate = variant?.timeline?.[0]?.date;
-  const lastDate = variant?.timeline?.[variant.timeline.length - 1]?.date;
+  const firstDate = state.appliedPeriodStart || variant?.timeline?.[0]?.date;
+  const lastDate = state.appliedPeriodEnd || variant?.timeline?.[variant.timeline.length - 1]?.date;
   const dates = isoDateRange(firstDate, lastDate);
   if (!dates.length) {
     return (variant?.timeline || []).map((item) => ({
@@ -316,6 +341,11 @@ function openVariantModal(variantId) {
       <div class="variant-modal-meta">
         <span class="variant-modal-chip">売上 ${escapeHtml(formatCurrency(variant.sales))}</span>
         <span class="variant-modal-chip">個数 ${escapeHtml(formatNumber(variant.units))}</span>
+        <span class="variant-modal-chip">${escapeHtml(
+          state.appliedPeriodStart && state.appliedPeriodEnd
+            ? `${formatDateLabel(state.appliedPeriodStart)} - ${formatDateLabel(state.appliedPeriodEnd)}`
+            : "-"
+        )}</span>
       </div>
     </header>
     ${
@@ -692,10 +722,15 @@ function renderSummary() {
   const products = getFilteredProducts();
   const totalSales = products.reduce((sum, product) => sum + product.sales, 0);
   const totalUnits = products.reduce((sum, product) => sum + product.units, 0);
+  const periodLabel =
+    state.appliedPeriodStart && state.appliedPeriodEnd
+      ? `${formatDateLabel(state.appliedPeriodStart)} - ${formatDateLabel(state.appliedPeriodEnd)}`
+      : "-";
   elements.summaryStrip.innerHTML = `
     <div class="summary-chip">商品数<strong>${formatNumber(products.length)}</strong></div>
     <div class="summary-chip">売上<strong>${formatCurrency(totalSales)}</strong></div>
     <div class="summary-chip">個数<strong>${formatNumber(totalUnits)}</strong></div>
+    <div class="summary-chip">期間<strong>${periodLabel}</strong></div>
   `;
 }
 
@@ -837,6 +872,8 @@ async function loadDashboard() {
   }
 
   closeVariantModal();
+  elements.applyButton.disabled = true;
+  elements.applyButton.textContent = "反映中";
   try {
     const response = await fetch(buildDashboardUrl(), {
       cache: "no-store",
@@ -852,6 +889,16 @@ async function loadDashboard() {
     }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     state.data = await response.json();
+    if (!state.appliedPeriodStart || !state.appliedPeriodEnd) {
+      const fallbackRange = state.data?.period?.start && state.data?.period?.end
+        ? { start: state.data.period.start, end: state.data.period.end }
+        : defaultPeriodRange();
+      state.appliedPeriodStart = fallbackRange.start;
+      state.appliedPeriodEnd = fallbackRange.end;
+      state.draftPeriodStart = fallbackRange.start;
+      state.draftPeriodEnd = fallbackRange.end;
+      syncPeriodInputs();
+    }
     const products = getFilteredProducts();
     if (!products.some((product) => product.id === state.selectedId)) {
       state.selectedId = products[0]?.id ?? null;
@@ -859,6 +906,9 @@ async function loadDashboard() {
     render();
   } catch (error) {
     elements.detailRoot.innerHTML = `<div class="empty-state">${error.message}</div>`;
+  } finally {
+    elements.applyButton.disabled = false;
+    elements.applyButton.textContent = "反映";
   }
 }
 
@@ -880,6 +930,28 @@ async function logout() {
 elements.searchInput.addEventListener("input", (event) => {
   state.query = event.target.value.trim();
   render();
+});
+
+elements.periodStart.addEventListener("input", (event) => {
+  state.draftPeriodStart = event.target.value || null;
+  if (state.draftPeriodStart && state.draftPeriodEnd && state.draftPeriodStart > state.draftPeriodEnd) {
+    state.draftPeriodEnd = state.draftPeriodStart;
+    elements.periodEnd.value = state.draftPeriodEnd;
+  }
+});
+
+elements.periodEnd.addEventListener("input", (event) => {
+  state.draftPeriodEnd = event.target.value || null;
+  if (state.draftPeriodStart && state.draftPeriodEnd && state.draftPeriodEnd < state.draftPeriodStart) {
+    state.draftPeriodStart = state.draftPeriodEnd;
+    elements.periodStart.value = state.draftPeriodStart;
+  }
+});
+
+elements.applyButton.addEventListener("click", () => {
+  state.appliedPeriodStart = state.draftPeriodStart || null;
+  state.appliedPeriodEnd = state.draftPeriodEnd || null;
+  loadDashboard();
 });
 
 elements.marketplaceFilters.querySelectorAll("[data-marketplace]").forEach((button) => {
@@ -911,6 +983,12 @@ document.addEventListener("keydown", (event) => {
 });
 
 async function bootstrap() {
+  const range = defaultPeriodRange();
+  state.appliedPeriodStart = range.start;
+  state.appliedPeriodEnd = range.end;
+  state.draftPeriodStart = range.start;
+  state.draftPeriodEnd = range.end;
+  syncPeriodInputs();
   const authenticated = await ensureAuthenticated();
   if (authenticated) {
     await loadDashboard();

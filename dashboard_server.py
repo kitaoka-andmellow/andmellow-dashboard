@@ -7,7 +7,7 @@ from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from eanalytics import build_dashboard
 from eanalytics.auth import (
@@ -86,6 +86,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         route = parsed.path
+        query = parse_qs(parsed.query)
         if route == "/healthz":
             body = b"ok"
             self.send_response(HTTPStatus.OK)
@@ -112,7 +113,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             session = self.require_session()
             if AUTH_REQUIRED and session is None:
                 return
-            payload = build_dashboard(DATA_ROOT)
+            period_start = query.get("start", [None])[0]
+            period_end = query.get("end", [None])[0]
+            payload = build_dashboard(DATA_ROOT, period_start=period_start, period_end=period_end)
             self.send_json(payload)
             return
         return super().do_GET()
