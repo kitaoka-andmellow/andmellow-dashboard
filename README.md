@@ -19,12 +19,10 @@ npm run dev
 
 http://localhost:3000 を開きます。
 
-## 本番化の想定
+## 本番で追加するもの
 
-- Frontend / Backend: Next.js on Cloud Run
-- Database: Cloud SQL PostgreSQL
-- Images: Cloud Storage
-- Jobs: Cloud Scheduler + Cloud Run Jobs
-- AI: OpenAI Responses API
-- Amazon: Selling Partner API
-- Rakuten: RMS API
+- Cloud SQL PostgreSQL
+- Cloud Storage
+- Amazon Selling Partner API
+- 楽天 RMS API
+- OpenAI API

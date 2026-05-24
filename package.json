@@ -5,18 +5,13 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "start": "next start"
   },
   "dependencies": {
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
     "lucide-react": "latest",
     "next": "latest",
     "react": "latest",
-    "react-dom": "latest",
-    "typescript": "latest"
+    "react-dom": "latest"
   },
   "devDependencies": {
     "autoprefixer": "latest",
